@@ -1,9 +1,9 @@
 
 # LLM.zig
-A project to implement an LLM in Ziglang.
+A project to implement LLMs in Ziglang.
 
 # Scope
-Initially, this project will aim at implementing LLAMA 2.
+Initially, this project will aim at implementing GPT or LLAMA 2.
 
 # Progress
 - TODO

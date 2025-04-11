@@ -50,7 +50,18 @@ pub fn main() !void {
     defer alloc.free(model_path_dupe);
     const config = try read_config(model_path_dupe);
     try stdout.print("loaded config\n", .{});
-    try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}\n", .{ config.dim, config.hidden_dim, config.n_layers, config.n_heads, config.n_kv_heads, config.vocab_size, config.max_seq_length });
+    // zig fmt: off
+    try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}, shared_classifier: {}\n", .{
+        config.dim,
+        config.hidden_dim,
+        config.n_layers,
+        config.n_heads,
+        config.n_kv_heads,
+        config.vocab_size,
+        config.max_seq_length,
+        config.shared_classifier,
+    });
+    // zig fmt: on
     try bw.flush();
 
     const tokenizer_path = "tokenizer.bin";
@@ -76,6 +87,8 @@ const Config = struct {
     vocab_size: usize,
     max_seq_length: usize,
 
+    shared_classifier: bool,
+
     /// Read a "Version 1" `llama.bin` file as exported by `llama2.c/export.py`
     fn read(reader: anytype) !Config {
         // Assume the machine which exports the v1 file is Little-Endian, which make parsing
@@ -99,6 +112,12 @@ const Config = struct {
         const vocab_size = try reader.readInt(i32, .little);
         const max_seq_length = try reader.readInt(i32, .little);
 
+        // Next byte indicates if the token embeddings are shared between the last layer of the
+        // model and the tokenizer embeddings.
+        const shared_classifier = try reader.readByte() == 1;
+
+        // And that's the end of the header.
+
         return Config{
             .dim = @intCast(dim),
             .hidden_dim = @intCast(hidden_dim),
@@ -107,6 +126,7 @@ const Config = struct {
             .n_kv_heads = @intCast(n_kv_heads),
             .vocab_size = @intCast(vocab_size),
             .max_seq_length = @intCast(max_seq_length),
+            .shared_classifier = shared_classifier,
         };
     }
 };

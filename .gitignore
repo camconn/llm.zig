@@ -1,0 +1,8 @@
+# Zig stuff
+zig-out
+.zig-cache
+
+# Editor files
+*.swp
+.\#*
+

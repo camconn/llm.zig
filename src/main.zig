@@ -216,7 +216,14 @@ const Tokenizer = struct {
             const score_bits = try reader.readInt(u32, .little);
             const score: f32 = @bitCast(score_bits);
             const token_len = try reader.readInt(u32, .little);
-            const token = try alloc.alloc(u8, token_len);
+            var token = try alloc.alloc(u8, token_len);
+
+            try reader.readNoEof(token[0..]);
+
+            // NB: Entries of index [3,256+3) are encoded in some special fashion for their raw
+            // bytes. These values are encoded like `<0xZZ>` where `ZZ` is the token's character
+            // value in hexadecimal.
+            // That seems to not be required for decoding, so we don't worry about it.
 
             const entry = TokenEntry{
                 .score = score,
@@ -224,7 +231,6 @@ const Tokenizer = struct {
                 .chars = token,
             };
 
-            try reader.readNoEof(token[0..]);
             try tokens.append(alloc, entry);
         }
 
@@ -240,7 +246,11 @@ const Tokenizer = struct {
                 return std.mem.order(u8, lhs, rhs) == .lt;
             }
         };
+
+        //dumpTokens(tokens);
+
         tokens.sortUnstable(Sorter{ .toks = &tokens });
+        //tokens.sort(Sorter{ .toks = &tokens });
         // `tokens` is now sorted by the source bytes/characters of each token entry in
         // semi-alphabetical order.
 
@@ -252,6 +262,20 @@ const Tokenizer = struct {
             .tokens = tokens,
             .arena = arena,
         };
+    }
+
+    fn dumpTokens(tokens: Storage) void {
+        const slice = tokens.slice();
+
+        const id = slice.items(.id);
+        const score = slice.items(.score);
+        const chars = slice.items(.chars);
+
+        for (0..32000) |i| {
+            const fmt = std.fmt.fmtSliceHexUpper(chars[i]);
+
+            std.debug.print("id: {d}; score={d:.3} chars={X}\n", .{ id[i], score[i], fmt });
+        }
     }
 
     fn deinit(self: *Self) void {
@@ -268,73 +292,156 @@ const Tokenizer = struct {
     const BOS_PIECE = "<s>";
     const EOS_PIECE = "</s>";
     const PAD_PIECE = "<pad>";
+    const SPACE_PIECE = " ";
 
     /// Encode text into a series of tokens.
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
     /// The caller is responsible for freeing the returned tokens from `token_alloc`.
-    fn encode(self: Self, text: []u8, token_alloc: Allocator) ![]Token {
+    fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Token {
+        // TODO: Handle un-encodable symbols with `<UNK>` or `UNK` token.
+
         // Optimistically assume we will output the entire text character
         // as a token.
-        var output = try token_alloc.alloc(Token, text.len);
-        errdefer token_alloc.free(output);
-        @memset(output, 0); // TODO: Figure out better initialization value
+        var output = std.ArrayList(Token).init(token_alloc);
+        defer output.deinit();
 
-        const Searcher = struct {
-            fn compare(ctx: []u8, item: []u8) std.math.Order {
-                return std.mem.order(u8, ctx, item);
-            }
-        };
+        // Make a heuristic guess about how long our tokenized sequence will be
+        try output.ensureTotalCapacity(text.len >> 2);
 
-        var out_i: usize = 0;
+        const slice = self.tokens.slice();
+        const chars = slice.items(.chars);
+        const ids = slice.items(.id);
+        const scores = slice.items(.score);
+
+        // SentencePiece automatically appends whitespace whenever the `add_dummy_prefix=True`
+        // in the Normalizer.
+        // Llama 2's tokenizer happens to use this setting, so go ahead and add a single space
+        // in front of all tokens we search for.
+        // This will be merged in the merge step so that [" ", "hello"] becomes [" hello"]
+        const space = lookupIndex(self.tokens.items(.chars), SPACE_PIECE).?;
+        // space's token ID is 35, but don't hard-code that for now
+        try output.append(ids[space]);
+
         var idx: usize = 0;
+        // BPE-like Search algorithm
+        // Start with the longest possible string to match then slowly trim
+        // trailing characters until we get a matching character.
         search: while (true) {
-            const rem = text.len - idx;
+            const rem = @min(text.len - idx, self.max_len);
             var end = @min(idx + rem, text.len);
 
             // Candidate is an empty slice first.
-            var candidate: []u8 = text[0..0];
+            var candidate: []const u8 = undefined;
+
             var match: ?TokenEntry = null;
             trim: while (end > idx) {
                 candidate = text[idx..end];
 
-                const found = std.sort.binarySearch([]u8, self.tokens.items(.chars), candidate, Searcher.compare);
-                if (found) |index| {
-                    match = self.tokens.get(index);
-                    const id = match.?.id;
-                    std.debug.print("found match at {d} (id={d}): <<{s}>>\n", .{ index, id, match.?.chars });
+                if (lookupIndex(chars, candidate)) |found| {
+                    match = self.tokens.get(found);
+                    //std.debug.print("found match (id={d}): <<{s}>>\n", .{ ids[found], chars[found] });
                     break :trim;
                 }
 
+                //std.debug.print("no match for (len {d}) <<{s}>>\n", .{ candidate.len, candidate });
                 end -= 1;
             }
 
             if (match) |found| {
-                output[out_i] = found.id;
-                std.debug.print("old idx={d}, out_i={d}\n", .{ idx, out_i });
+                try output.append(found.id);
+                //std.debug.print("old idx={d}, out_i={d}\n", .{ idx, output.items.len });
                 idx += found.chars.len;
-                std.debug.print("new idx: {d}\n", .{idx});
-                out_i += 1;
+                //std.debug.print("new idx: {d}\n", .{idx});
                 continue :search;
             } else if (idx == text.len) {
-                std.debug.print("Done searching\n", .{});
+                //std.debug.print("Done searching\n", .{});
                 break :search;
             } else {
-                std.debug.print("No match found for <<{s}>>\n", .{text[idx..end]});
-                std.debug.print("out_i={d}, idx={d}\n", .{ out_i, idx });
-                std.debug.print("output {any}\n", .{output});
-                @panic("No match found");
+                std.debug.print("Failed to find match at out_i={d}, idx={d}, max_len={d}, text.len={d}\n", .{ output.items.len, idx, self.max_len, text.len });
+                //std.debug.print("idx={d}, max_len={d}, end={d}; other={s}\n", .{ idx, self.max_len, end, text[idx .. idx + self.max_len] });
+                //std.debug.print("No match found for <<{s}>>\n", .{text[idx..end]});
+                //std.debug.print("out_i={d}, idx={d}, text.len={d}\n", .{ output.items.len, idx, text.len });
+                //std.debug.print("output {any}\n", .{output});
+                @panic("Failed to tokenize candidate");
             }
 
             // Done searching
             break;
         }
 
-        // TODO: Shrink output
-        //_ = token_alloc.resize(output, out_i);
-        //output = output[0..out_i];
-        // TODO: how to mark end of tokens?
-        return output;
+        //std.debug.print("Performing merge starting with {d}\n", .{output.items.len});
+
+        // Do merge algorithm
+        var buf: [64]u8 = undefined;
+        var i: usize = 0;
+        while (i < output.items.len - 1) {
+            //std.debug.print("merge with i={d}\n", .{i});
+            var best: f32 = -999_999_999;
+            var best_merge: ?TokenEntry = null;
+
+            const left_idx = findTokenById(ids, output.items[i]).?;
+            const right_idx = findTokenById(ids, output.items[i + 1]).?;
+
+            const left_chars = chars[left_idx];
+            const right_chars = chars[right_idx];
+
+            const combined = try std.fmt.bufPrint(&buf, "{s}{s}", .{ left_chars, right_chars });
+            //std.debug.print("Trying to merge <<{s}>>\n", .{combined});
+            if (lookupIndex(chars, combined)) |index| {
+                if (scores[index] > best) {
+                    best = scores[index];
+                    best_merge = self.tokens.get(index);
+                }
+            }
+
+            if (best_merge) |have_better| {
+                // zig fmt: off
+                //const left_id = output.items[i];
+                //const right_id = output.items[i + 1];
+                //std.debug.print("Merged tokens (id={d}) <<{s}>> and (id={d}) <<{s}>> into token {d} <<{s}>>\n",
+                //                .{ left_id, left_chars, right_id, right_chars, have_better.id, have_better.chars });
+                // zig fmt: on
+                _ = output.orderedRemove(i);
+                output.items[i] = have_better.id;
+
+                // Don't increment `i` and try to merge again.
+            }
+            //} else {
+            i += 1;
+            //}
+        }
+
+        // Shrink output to final size
+        return output.toOwnedSlice();
+    }
+
+    const Searcher = struct {
+        fn compare(ctx: []const u8, item: []const u8) std.math.Order {
+            return std.mem.order(u8, ctx, item);
+        }
+    };
+
+    /// Find the index for a needle in the haystack.
+    /// Returns an index if the exact match is found and `null` otherwise.
+    fn lookupIndex(haystack: [][]u8, needle: []const u8) ?usize {
+        //if (std.sort.binarySearch([]u8, self.tokens.field(.chars), str, Searcher.compare)) |index| {
+        if (std.sort.binarySearch([]u8, haystack, needle, Searcher.compare)) |index| {
+            return index;
+        } else {
+            return null;
+        }
+    }
+
+    /// Find a token by its token id.
+    fn findTokenById(ids: []Token, token: Token) ?usize {
+        for (0.., ids) |i, id| {
+            if (id == token) {
+                return i;
+            }
+        }
+
+        return null;
     }
 };
 
@@ -347,6 +454,63 @@ fn load_tokenizer(tokenizer_file: []u8, alloc: Allocator, vocab_size: usize) !To
     var buffer = std.io.bufferedReader(tokenizer.reader());
 
     return try Tokenizer.read(buffer.reader(), alloc, vocab_size);
+}
+
+test "Tokenizer.encode" {
+    const tok_path = try std.testing.allocator.dupe(u8, "tokenizer.bin");
+    defer std.testing.allocator.free(tok_path);
+    var tokenizer = try load_tokenizer(tok_path, std.testing.allocator, 32000);
+    defer tokenizer.deinit();
+
+    {
+        const sample = "Hello, world! How are you today?";
+        const ids = [_]Tokenizer.Token{ 15043, 29892, 3186, 29991, 1128, 526, 366, 9826, 29973 };
+
+        const tokens = try tokenizer.encode(sample, std.testing.allocator);
+        defer std.testing.allocator.free(tokens);
+
+        try std.testing.expectEqualSlices(Tokenizer.Token, &ids, tokens);
+    }
+
+    {
+        const sample = "Hello\nworld"; // TODO: Handle issue w/ leading spaces
+        const ids = [_]Tokenizer.Token{ 15043, 13, 11526 };
+
+        const tokens = try tokenizer.encode(sample, std.testing.allocator);
+        defer std.testing.allocator.free(tokens);
+
+        try std.testing.expectEqualSlices(Tokenizer.Token, &ids, tokens);
+    }
+
+    {
+        const sample = "Byte pair encoding[1][2] (also known as BPE, or digram";
+        // zig fmt: off
+        const ids = [_]Tokenizer.Token{
+            19831, 5101, 8025, 29961, 29896, 3816, 29906, 29962,
+            313, 15189, 2998, 408, 350, 4162, 29892, 470,
+            4697, 2572
+        };
+        // zig fmt: on
+
+        const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
+        defer std.testing.allocator.free(tokens);
+
+        try std.testing.expectEqualSlices(Tokenizer.Token, &ids, tokens);
+    }
+
+    {
+        const sample = @embedFile("assets/bpe_sample.txt");
+        const out_ids = @embedFile("assets/bpe_sample_expected.json");
+
+        var ids_json = try std.json.parseFromSlice([]Tokenizer.Token, std.testing.allocator, out_ids, .{});
+        defer ids_json.deinit();
+        const ids = ids_json.value;
+
+        const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
+        defer std.testing.allocator.free(tokens);
+
+        try std.testing.expectEqualSlices(Tokenizer.Token, ids, tokens);
+    }
 }
 
 /// Struct which contains the weights for the transformer.

@@ -53,5 +53,22 @@ not shared_classifier (separate model.output) shape: torch.Size([32000, 4096])
 wrote llama2-7b.bin
 ```
 
-# Progress
-- TODO
+# TODO
+- [x] Load/parse the tokenizer + model
+- [ ] Tokenizer
+  - [ ] Encode string -> tokens
+  - [ ] Decode tokens -> string
+  - [ ] Add tests vs sentencepiece
+- [ ] RoPE
+- [ ] MatMul
+- [ ] SwiGLU
+- [ ] Attention
+  - [ ] Caching (optional, may be helpful for iteration/speed)
+- [ ] Feed Forward
+- [ ] Softmax
+- [ ] Logits/Sample
+
+
+# Notes
+Will probably be useful to use `std.math.Complex` for the RoPE stuff w/ complex
+#s in a `@Vector`.

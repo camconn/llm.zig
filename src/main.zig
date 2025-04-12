@@ -74,11 +74,24 @@ pub fn main() !void {
     try stdout.print("loaded tokenizer\nmax tokenizer length: {d}\n", .{tokenizer.max_len});
     try bw.flush();
 
-    // TODO: Load weights
     var transformer = try TransformerV1.init(model_path_dupe, config);
     defer transformer.deinit();
     try stdout.print("Done loading model...\n", .{});
     try bw.flush();
+
+    {
+        const prompt_example = "Hello, world! How are you today?";
+        const prompt_dupe = try alloc.dupe(u8, prompt_example);
+        defer alloc.free(prompt_dupe);
+
+        const tokens = try tokenizer.encode(prompt_dupe, alloc);
+        defer alloc.free(tokens);
+
+        std.debug.print("Got {d} encoded tokens\n", .{tokens.len});
+        for (0.., tokens) |i, tok| {
+            std.debug.print("Token #{d} = {d}\n", .{ i, tok });
+        }
+    }
 
     try stdout.print("Done with work.\n", .{});
     try stdout.print("\n\n", .{});
@@ -155,14 +168,27 @@ fn read_config(model_path: []u8) !Config {
 }
 
 const Tokenizer = struct {
+    // TODO: Read the original `sentencepiece.sentencepice_model_pb.ModelProto()` file instead
+    //       to read original/custom `.model` files.
     const Self = @This();
 
-    tokens: [][]u8,
-    scores: []f32,
+    /// A single Token's ID. Represents one of 32000 vocab value or a sentinel token.
+    /// Note that a padding token == -1, hence the signed-ness.
+    pub const Token = i16;
+    const TokenEntry = struct {
+        score: f32,
+        id: Token,
+        chars: []u8,
+    };
+    const Storage = std.MultiArrayList(TokenEntry);
+
+    tokens: Storage,
     max_len: usize,
     arena: ArenaAllocator,
 
     /// Read an exported Tokenizer model as exported by `llama2.c/tokenizer.py`
+    /// Any scores and bytes read will be allocated with the supplied `Allocator` and only
+    /// be freed after calling `deinit()`.
     fn read(reader: anytype, allocator: Allocator, vocab_size: usize) !Tokenizer {
         // Read a tokenizer file as written from Karpathy's `llama2.c`
         // According to `tokenizer.py`, the format is:
@@ -176,38 +202,139 @@ const Tokenizer = struct {
         // The tokenizer file was likely created on a Little-Endian machine, so we
         // will assume these values are Little-Endian
 
+        const max_len: usize = @intCast(try reader.readInt(u32, .little));
+
         var arena = ArenaAllocator.init(allocator);
         errdefer arena.deinit();
-
-        var ret: Tokenizer = undefined;
-
-        ret.max_len = try reader.readInt(u32, .little);
-
         var alloc = arena.allocator();
-        ret.scores = try alloc.alloc(f32, vocab_size);
 
-        ret.tokens = try alloc.alloc([]u8, vocab_size);
+        var tokens = Storage{};
+        try tokens.ensureTotalCapacity(alloc, vocab_size + 10); // add 10 size for safety.
 
         // Nothing we can really do here if there's an error
         for (0..vocab_size) |i| {
             const score_bits = try reader.readInt(u32, .little);
             const score: f32 = @bitCast(score_bits);
-            ret.scores[i] = score;
             const token_len = try reader.readInt(u32, .little);
             const token = try alloc.alloc(u8, token_len);
-            ret.tokens[i] = token;
+
+            const entry = TokenEntry{
+                .score = score,
+                .id = @intCast(i),
+                .chars = token,
+            };
+
             try reader.readNoEof(token[0..]);
+            try tokens.append(alloc, entry);
         }
+
+        // Sort the token so that the `chars` elements are in order
+        const Sorter = struct {
+            const Sorter = @This();
+            toks: *Storage,
+            pub fn lessThan(self: Sorter, left_index: usize, right_index: usize) bool {
+                const lhs = self.toks.items(.chars)[left_index];
+                const rhs = self.toks.items(.chars)[right_index];
+
+                // TODO: Use a real Unicode collator and ensure source tokens are normalized.
+                return std.mem.order(u8, lhs, rhs) == .lt;
+            }
+        };
+        tokens.sortUnstable(Sorter{ .toks = &tokens });
+        // `tokens` is now sorted by the source bytes/characters of each token entry in
+        // semi-alphabetical order.
 
         // Copy the Area after all of the copies have been done, otherwise there will be
         // a leak from the Arena's allocations.
-        ret.arena = arena;
-
-        return ret;
+        // Same with Token Storage
+        return .{
+            .max_len = max_len,
+            .tokens = tokens,
+            .arena = arena,
+        };
     }
 
     fn deinit(self: *Self) void {
+        self.tokens.deinit(self.arena.allocator());
         self.arena.deinit();
+    }
+
+    const UNK = 0;
+    const BOS = 1;
+    const EOS = 2;
+    const PAD = -1;
+
+    const UNK_PIECE = "<unk>";
+    const BOS_PIECE = "<s>";
+    const EOS_PIECE = "</s>";
+    const PAD_PIECE = "<pad>";
+
+    /// Encode text into a series of tokens.
+    /// Any slice returned will be allocated with `token_alloc`. The allocator used for
+    /// calling `init()` will not be used.
+    /// The caller is responsible for freeing the returned tokens from `token_alloc`.
+    fn encode(self: Self, text: []u8, token_alloc: Allocator) ![]Token {
+        // Optimistically assume we will output the entire text character
+        // as a token.
+        var output = try token_alloc.alloc(Token, text.len);
+        errdefer token_alloc.free(output);
+        @memset(output, 0); // TODO: Figure out better initialization value
+
+        const Searcher = struct {
+            fn compare(ctx: []u8, item: []u8) std.math.Order {
+                return std.mem.order(u8, ctx, item);
+            }
+        };
+
+        var out_i: usize = 0;
+        var idx: usize = 0;
+        search: while (true) {
+            const rem = text.len - idx;
+            var end = @min(idx + rem, text.len);
+
+            // Candidate is an empty slice first.
+            var candidate: []u8 = text[0..0];
+            var match: ?TokenEntry = null;
+            trim: while (end > idx) {
+                candidate = text[idx..end];
+
+                const found = std.sort.binarySearch([]u8, self.tokens.items(.chars), candidate, Searcher.compare);
+                if (found) |index| {
+                    match = self.tokens.get(index);
+                    const id = match.?.id;
+                    std.debug.print("found match at {d} (id={d}): <<{s}>>\n", .{ index, id, match.?.chars });
+                    break :trim;
+                }
+
+                end -= 1;
+            }
+
+            if (match) |found| {
+                output[out_i] = found.id;
+                std.debug.print("old idx={d}, out_i={d}\n", .{ idx, out_i });
+                idx += found.chars.len;
+                std.debug.print("new idx: {d}\n", .{idx});
+                out_i += 1;
+                continue :search;
+            } else if (idx == text.len) {
+                std.debug.print("Done searching\n", .{});
+                break :search;
+            } else {
+                std.debug.print("No match found for <<{s}>>\n", .{text[idx..end]});
+                std.debug.print("out_i={d}, idx={d}\n", .{ out_i, idx });
+                std.debug.print("output {any}\n", .{output});
+                @panic("No match found");
+            }
+
+            // Done searching
+            break;
+        }
+
+        // TODO: Shrink output
+        //_ = token_alloc.resize(output, out_i);
+        //output = output[0..out_i];
+        // TODO: how to mark end of tokens?
+        return output;
     }
 };
 
@@ -286,6 +413,8 @@ const TransformerV1 = struct {
 
         // V1 Export Format from `llama2.c`
         // The first 256 bytes contain the header with trailing 0 padding.
+
+        // TODO: Load the `Config` header here instead of in a separate discrete function.
 
         // We have the ptr. Time to handle it.
         const total_len: usize = @as(usize, @intCast(fsize)) - header_len;

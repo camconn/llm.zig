@@ -10,6 +10,8 @@ const Allocator = std.mem.Allocator;
 const clap = @import("clap");
 
 const GPA = std.heap.GeneralPurposeAllocator(.{});
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Complex = std.math.Complex;
 
 pub fn main() !void {
     var gpa = GPA{};
@@ -67,14 +69,22 @@ pub fn main() !void {
     const tokenizer_path = "tokenizer.bin";
     const tokenizer_path_dupe = try alloc.dupeZ(u8, tokenizer_path);
     defer alloc.free(tokenizer_path_dupe);
-    var tokenizer = try load_tokenizer(tokenizer_path_dupe, gpa.allocator(), config.vocab_size);
+    var tokenizer = try load_tokenizer(tokenizer_path_dupe, alloc, config.vocab_size);
     defer tokenizer.deinit();
     try stdout.print("loaded tokenizer\nmax tokenizer length: {d}\n", .{tokenizer.max_len});
     try bw.flush();
 
     // TODO: Load weights
+    var transformer = try TransformerV1.init(model_path_dupe);
+    defer transformer.deinit();
+    try stdout.print("Done loading model...\n", .{});
+    try bw.flush();
 
-    try stdout.print("Done\n", .{});
+    try stdout.print("Done with work.\n", .{});
+    try stdout.print("\n\n", .{});
+    try bw.flush();
+
+    try stdout.print("Cleaning up\n", .{});
     try bw.flush();
 }
 
@@ -150,10 +160,10 @@ const Tokenizer = struct {
     tokens: [][]u8,
     scores: []f32,
     max_len: usize,
-    alloc: Allocator,
+    arena: ArenaAllocator,
 
     /// Read an exported Tokenizer model as exported by `llama2.c/tokenizer.py`
-    fn read(reader: anytype, alloc: Allocator, vocab_size: usize) !Tokenizer {
+    fn read(reader: anytype, allocator: Allocator, vocab_size: usize) !Tokenizer {
         // Read a tokenizer file as written from Karpathy's `llama2.c`
         // According to `tokenizer.py`, the format is:
         //
@@ -166,24 +176,17 @@ const Tokenizer = struct {
         // The tokenizer file was likely created on a Little-Endian machine, so we
         // will assume these values are Little-Endian
 
-        var ret: Tokenizer = undefined;
+        var arena = ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
 
-        ret.alloc = alloc;
+        var ret: Tokenizer = undefined;
 
         ret.max_len = try reader.readInt(u32, .little);
 
+        var alloc = arena.allocator();
         ret.scores = try alloc.alloc(f32, vocab_size);
-        errdefer alloc.free(ret.scores);
 
         ret.tokens = try alloc.alloc([]u8, vocab_size);
-        errdefer {
-            for (ret.tokens) |tok| {
-                if (tok.len != 0) {
-                    alloc.free(tok);
-                }
-            }
-        }
-        errdefer alloc.free(ret.tokens);
 
         // Nothing we can really do here if there's an error
         for (0..vocab_size) |i| {
@@ -196,15 +199,15 @@ const Tokenizer = struct {
             try reader.readNoEof(token[0..]);
         }
 
+        // Copy the Area after all of the copies have been done, otherwise there will be
+        // a leak from the Arena's allocations.
+        ret.arena = arena;
+
         return ret;
     }
 
     fn deinit(self: *Self) void {
-        for (self.tokens) |token| {
-            self.alloc.free(token);
-        }
-        self.alloc.free(self.tokens);
-        self.alloc.free(self.scores);
+        self.arena.deinit();
     }
 };
 
@@ -218,3 +221,84 @@ fn load_tokenizer(tokenizer_file: []u8, alloc: Allocator, vocab_size: usize) !To
 
     return try Tokenizer.read(buffer.reader(), alloc, vocab_size);
 }
+
+/// Struct which contains the weights for the transformer.
+/// This is loaded from a V1 export from `llama2.c`.
+///
+/// This struct is for calculation purposes immutable and represents
+/// the contents of the loaded model, backed by `mmap(2)`.
+const TransformerV1 = struct {
+    pub const page_size_min = std.heap.page_size_min;
+
+    const Self = @This();
+
+    fd: std.posix.fd_t,
+    ptr: ?[]align(page_size_min) u8,
+
+    /// Initialize the Transformer weight pointers with the provided file.
+    fn init(model_path: []u8) !TransformerV1 {
+        std.debug.print("Opening Transformer model\n", .{});
+        const fd = try std.posix.open(model_path, .{}, 0o440);
+
+        // Here we mmap() the weights files because nobody wants to open up a 25 GB file raw!
+        const stat = try std.posix.fstat(fd);
+        // zig fmt: off
+        std.debug.print(
+            "Model size: {d:.1} MiB\n",
+            .{ @as(f32, @floatFromInt(stat.size)) / 1048576.0 }
+        );
+        // zig fmt: on
+
+        const fsize: u64 = @intCast(stat.size);
+
+        // See `std.os.linux.MAP` for more info.
+        //std.os.linux.MAP
+        const mmap_type: std.posix.MAP = .{
+            .TYPE = .PRIVATE,
+        };
+
+        const ptr = try std.posix.mmap(null, fsize, std.posix.PROT.READ, mmap_type, fd, 0);
+
+        // V1 Export Format from `llama2.c`
+        // The first 256 bytes contain the header with trailing 0 padding.
+        //
+
+        // We have the ptr. Time to handle it.
+        //const _weight_start = @intFromPtr(ptr) + 256;
+
+        // According to the output from the modified `export.py` file, we have these dimensions:
+        // layers: 32 (known from config)
+
+        // normalization layers:
+        // attention:   [4096]f32
+        // ffn_norm:    [4096]f32
+        // norm:        [4096]f32
+
+        // token embeddings:
+        // embed:       [vocab_size][4096]f32
+
+        // attention layers:
+        // wq:          [4096][4096]f32
+        // wk:          [4096][4096]f32
+        // wv:          [4096][4096]f32
+        // wo:          [4096][4096]f32
+
+        // ff layers:
+        // w1:          [11008][4096]f32
+        // w2:          [4096][11008]f32
+        // w3:          [11008][4096]f32
+        // output:      [vocab_size][4096]f32
+
+        return TransformerV1{
+            .fd = fd,
+            .ptr = ptr,
+        };
+    }
+
+    fn deinit(self: *Self) void {
+        std.debug.print("Transformer.deinit()\n", .{});
+        std.posix.munmap(self.ptr.?);
+        self.ptr = null;
+        self.fd = -1;
+    }
+};

@@ -75,7 +75,7 @@ pub fn main() !void {
     try bw.flush();
 
     // TODO: Load weights
-    var transformer = try TransformerV1.init(model_path_dupe);
+    var transformer = try TransformerV1.init(model_path_dupe, config);
     defer transformer.deinit();
     try stdout.print("Done loading model...\n", .{});
     try bw.flush();
@@ -228,17 +228,41 @@ fn load_tokenizer(tokenizer_file: []u8, alloc: Allocator, vocab_size: usize) !To
 /// This struct is for calculation purposes immutable and represents
 /// the contents of the loaded model, backed by `mmap(2)`.
 const TransformerV1 = struct {
-    pub const page_size_min = std.heap.page_size_min;
-
     const Self = @This();
+    const page_size_min = std.heap.page_size_min;
+    const header_len = 256;
+
+    // Best we can guess is the alignment is `4` based on the file export.
+    const Weights = []align(4) f32;
 
     fd: std.posix.fd_t,
     ptr: ?[]align(page_size_min) u8,
 
+    // Embeddings
+    token_embed: Weights,
+    // Attention
+    rms_attention: Weights,
+    // Attention Layers
+    w_q: Weights,
+    w_k: Weights,
+    w_v: Weights,
+    w_o: Weights,
+    // Feed forward
+    feed_forward_norm: Weights,
+    // Unknown
+    w1: Weights,
+    w2: Weights,
+    w3: Weights,
+    // Output norms
+    norm: Weights,
+    // Only set whenever no shared classifier layer with tokenizer
+    classifier: Weights,
+
     /// Initialize the Transformer weight pointers with the provided file.
-    fn init(model_path: []u8) !TransformerV1 {
+    fn init(model_path: []u8, config: Config) !TransformerV1 {
         std.debug.print("Opening Transformer model\n", .{});
         const fd = try std.posix.open(model_path, .{}, 0o440);
+        errdefer std.posix.close(fd);
 
         // Here we mmap() the weights files because nobody wants to open up a 25 GB file raw!
         const stat = try std.posix.fstat(fd);
@@ -258,40 +282,105 @@ const TransformerV1 = struct {
         };
 
         const ptr = try std.posix.mmap(null, fsize, std.posix.PROT.READ, mmap_type, fd, 0);
+        errdefer std.posix.munmap(ptr);
 
         // V1 Export Format from `llama2.c`
         // The first 256 bytes contain the header with trailing 0 padding.
-        //
 
         // We have the ptr. Time to handle it.
-        //const _weight_start = @intFromPtr(ptr) + 256;
+        const total_len: usize = @as(usize, @intCast(fsize)) - header_len;
+        const total_elems = total_len / @sizeOf(f32);
+
+        const raw_ptr: [*]align(4) f32 = @ptrFromInt(@intFromPtr(&ptr[header_len]));
+        const weights = raw_ptr[0..total_elems];
+
+        const vocab = config.vocab_size;
+        const dim = config.dim;
+        const hidden_dim = config.hidden_dim;
+        const layers = config.n_layers;
+        const n_heads = config.n_heads;
+        const n_kv_heads = config.n_kv_heads;
+        const head_size = dim / config.n_heads;
 
         // According to the output from the modified `export.py` file, we have these dimensions:
         // layers: 32 (known from config)
+        var i: usize = 0;
 
-        // normalization layers:
+        // normalization layers (7b)
         // attention:   [4096]f32
         // ffn_norm:    [4096]f32
         // norm:        [4096]f32
+        const rms_attention: Weights = weights[i .. i + layers * dim];
+        i += rms_attention.len;
+        const ffn_norm: Weights = weights[i .. i + layers * dim];
+        i += ffn_norm.len;
+        const norms: Weights = weights[i .. i + dim];
+        i += norms.len;
 
-        // token embeddings:
+        // token embeddings (7b)
         // embed:       [vocab_size][4096]f32
+        const token_embed: Weights = weights[i .. i + vocab * dim];
+        i += token_embed.len;
 
-        // attention layers:
+        // attention layers (7b)
         // wq:          [4096][4096]f32
         // wk:          [4096][4096]f32
         // wv:          [4096][4096]f32
         // wo:          [4096][4096]f32
 
-        // ff layers:
+        const wq: Weights = weights[i .. i + layers * dim * (n_heads * head_size)];
+        i += wq.len;
+        const wk: Weights = weights[i .. i + layers * dim * (n_kv_heads * head_size)];
+        i += wq.len;
+        const wv: Weights = weights[i .. i + layers * dim * (n_kv_heads * head_size)];
+        i += wv.len;
+        const wo: Weights = weights[i .. i + layers * (n_heads * head_size) * dim];
+        i += wo.len;
+
+        // ff layers (7b)
         // w1:          [11008][4096]f32
         // w2:          [4096][11008]f32
         // w3:          [11008][4096]f32
         // output:      [vocab_size][4096]f32
+        const w1: Weights = weights[i .. i + layers * dim * hidden_dim];
+        i += w1.len;
+        const w2: Weights = weights[i .. i + layers * hidden_dim * dim];
+        i += w2.len;
+        const w3: Weights = weights[i .. i + layers * dim * hidden_dim];
+        i += w3.len;
+
+        var out_classifier: ?Weights = null;
+        if (config.shared_classifier) {
+            out_classifier = token_embed;
+        } else {
+            out_classifier = weights[i .. i + dim * vocab];
+            i += out_classifier.?.len;
+        }
+
+        const used_size = i * @sizeOf(f32) + header_len;
+
+        std.debug.print("weights size: {d}, used: {d}\n", .{ fsize, used_size });
+        std.debug.assert(fsize == used_size); // make sure we read the whole file.
 
         return TransformerV1{
             .fd = fd,
             .ptr = ptr,
+
+            .rms_attention = rms_attention,
+            .token_embed = token_embed,
+            .feed_forward_norm = ffn_norm,
+            .norm = norms,
+
+            .w_q = wq,
+            .w_k = wk,
+            .w_v = wv,
+            .w_o = wo,
+
+            .w1 = w1,
+            .w2 = w2,
+            .w3 = w3,
+
+            .classifier = out_classifier.?,
         };
     }
 

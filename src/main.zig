@@ -328,24 +328,14 @@ const Tokenizer = struct {
         // Start with the longest possible string to match then slowly trim
         // trailing characters until we get a matching character.
         search: while (true) {
-            const rem = @min(text.len - idx, self.max_len);
-            var end = @min(idx + rem, text.len);
+            const end = @min(idx + 1, text.len);
 
-            // Candidate is an empty slice first.
-            var candidate: []const u8 = undefined;
+            // TODO: Support UTF-8 strings.
+            const candidate = text[idx..end];
 
             var match: ?TokenEntry = null;
-            trim: while (end > idx) {
-                candidate = text[idx .. idx + 1];
-
-                if (lookupIndex(chars, candidate)) |found| {
-                    match = self.tokens.get(found);
-                    //std.debug.print("found match (id={d}): <<{s}>>\n", .{ ids[found], chars[found] });
-                    break :trim;
-                }
-
-                //std.debug.print("no match for (len {d}) <<{s}>>\n", .{ candidate.len, candidate });
-                end -= 1;
+            if (lookupIndex(chars, candidate)) |found| {
+                match = self.tokens.get(found);
             }
 
             if (match) |found| {
@@ -371,9 +361,8 @@ const Tokenizer = struct {
             break;
         }
 
-        //std.debug.print("Performing merge starting with {d}\n", .{output.items.len});
-
         // Do merge algorithm
+        //std.debug.print("Performing merge starting with {d}\n", .{output.items.len});
         var buf: [64]u8 = undefined;
         while (true) {
             var best: f32 = -1e10;

@@ -185,6 +185,7 @@ const Tokenizer = struct {
     tokens: Storage,
     max_len: usize,
     arena: ArenaAllocator,
+    idx_to_token: []usize,
 
     /// Read an exported Tokenizer model as exported by `llama2.c/tokenizer.py`
     /// Any scores and bytes read will be allocated with the supplied `Allocator` and only
@@ -250,9 +251,16 @@ const Tokenizer = struct {
         //dumpTokens(tokens);
 
         tokens.sortUnstable(Sorter{ .toks = &tokens });
-        //tokens.sort(Sorter{ .toks = &tokens });
         // `tokens` is now sorted by the source bytes/characters of each token entry in
         // semi-alphabetical order.
+
+        // Build mapping of Token ID to index in `tokens`
+        var token_to_idx = try alloc.alloc(usize, vocab_size);
+        const ids = tokens.items(.id);
+        for (0..vocab_size) |i| {
+            const token = ids[i];
+            token_to_idx[@intCast(token)] = i;
+        }
 
         // Copy the Area after all of the copies have been done, otherwise there will be
         // a leak from the Arena's allocations.
@@ -261,6 +269,7 @@ const Tokenizer = struct {
             .max_len = max_len,
             .tokens = tokens,
             .arena = arena,
+            .idx_to_token = token_to_idx,
         };
     }
 
@@ -393,8 +402,10 @@ const Tokenizer = struct {
             var node = tokens.first;
 
             while (node.?.next) |next| {
-                const left_idx = findTokenById(ids, node.?.data).?;
-                const right_idx = findTokenById(ids, next.data).?;
+                //const left_idx = findTokenById(ids, node.?.data).?;
+                //const right_idx = findTokenById(ids, next.data).?;
+                const left_idx = self.findTokenById(node.?.data).?;
+                const right_idx = self.findTokenById(next.data).?;
 
                 const left_chars = chars[left_idx];
                 const right_chars = chars[right_idx];
@@ -455,15 +466,9 @@ const Tokenizer = struct {
         }
     }
 
-    /// Find a token by its token id.
-    fn findTokenById(ids: []Token, token: Token) ?usize {
-        for (0.., ids) |i, id| {
-            if (id == token) {
-                return i;
-            }
-        }
-
-        return null;
+    /// Find a token by its index in `tokens`.
+    fn findTokenById(self: Self, token: Token) ?usize {
+        return self.idx_to_token[@intCast(token)];
     }
 };
 
@@ -520,19 +525,19 @@ test "Tokenizer.encode" {
         try std.testing.expectEqualSlices(Tokenizer.Token, &ids, tokens);
     }
 
-    //{
-    //    const sample = @embedFile("assets/bpe_sample.txt");
-    //    const out_ids = @embedFile("assets/bpe_sample_expected.json");
+    {
+        const sample = @embedFile("assets/bpe_sample.txt");
+        const out_ids = @embedFile("assets/bpe_sample_expected.json");
 
-    //    var ids_json = try std.json.parseFromSlice([]Tokenizer.Token, std.testing.allocator, out_ids, .{});
-    //    defer ids_json.deinit();
-    //    const ids = ids_json.value;
+        var ids_json = try std.json.parseFromSlice([]Tokenizer.Token, std.testing.allocator, out_ids, .{});
+        defer ids_json.deinit();
+        const ids = ids_json.value;
 
-    //    const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
-    //    defer std.testing.allocator.free(tokens);
+        const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
+        defer std.testing.allocator.free(tokens);
 
-    //    try std.testing.expectEqualSlices(Tokenizer.Token, ids, tokens);
-    //}
+        try std.testing.expectEqualSlices(Tokenizer.Token, ids, tokens);
+    }
 }
 
 /// Struct which contains the weights for the transformer.

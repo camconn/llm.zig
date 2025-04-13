@@ -93,6 +93,12 @@ pub fn main() !void {
         }
     }
 
+    var state = try State.init(alloc, config);
+    defer state.deinit();
+
+    // " Hello" = 15043
+    _ = transformer.forward(&state, 15043, 0);
+
     try stdout.print("Done with work.\n", .{});
     try stdout.print("\n\n", .{});
     try bw.flush();
@@ -540,6 +546,77 @@ test "Tokenizer.encode" {
     }
 }
 
+/// Represents the current state of a transformer.
+const State = struct {
+    arena: ArenaAllocator,
+
+    // x
+    input: []f32,
+    // xb
+    residual: []f32,
+    // xb2
+    tmp: []f32,
+    // hb
+    hidden1: []f32,
+    // hb2
+    hidden2: []f32,
+
+    q: []f32,
+    k: []f32,
+    v: []f32,
+
+    attention: []f32,
+    // logits
+    output: []f32,
+
+    k_cache: []f32,
+    v_cache: []f32,
+
+    fn init(alloc: Allocator, config: Config) !State {
+        var arena = ArenaAllocator.init(alloc);
+        var a = arena.allocator();
+
+        const kv_dim = config.dim * config.n_kv_heads / config.n_heads;
+
+        const x = try a.alloc(f32, config.dim);
+        const xb = try a.alloc(f32, config.dim);
+        const xb2 = try a.alloc(f32, config.dim);
+        const hb1 = try a.alloc(f32, config.hidden_dim);
+        const hb2 = try a.alloc(f32, config.hidden_dim);
+
+        const q = try a.alloc(f32, config.dim);
+        const k = try a.alloc(f32, config.n_layers * config.dim * kv_dim);
+        const v = try a.alloc(f32, config.n_layers * config.dim * kv_dim);
+
+        const k_cache = try a.alloc(f32, config.n_layers * config.max_seq_length * kv_dim);
+        const v_cache = try a.alloc(f32, config.n_layers * config.max_seq_length * kv_dim);
+
+        const att = try a.alloc(f32, config.n_heads * config.max_seq_length);
+        const logits = try a.alloc(f32, config.vocab_size);
+
+        return .{
+            .arena = arena,
+            // layers and temporaries
+            .input = x,
+            .residual = xb,
+            .tmp = xb2,
+            .hidden1 = hb1,
+            .hidden2 = hb2,
+            .q = q,
+            .k = k,
+            .v = v,
+            .k_cache = k_cache,
+            .v_cache = v_cache,
+            .attention = att,
+            .output = logits,
+        };
+    }
+
+    fn deinit(self: @This()) void {
+        self.arena.deinit();
+    }
+};
+
 /// Struct which contains the weights for the transformer.
 /// This is loaded from a V1 export from `llama2.c`.
 ///
@@ -552,6 +629,9 @@ const TransformerV1 = struct {
 
     // Best we can guess is the alignment is `4` based on the file export.
     const Weights = []align(4) f32;
+
+    // Config weights
+    config: Config,
 
     fd: std.posix.fd_t,
     ptr: ?[]align(page_size_min) u8,
@@ -575,6 +655,9 @@ const TransformerV1 = struct {
     norm: Weights,
     // Only set whenever no shared classifier layer with tokenizer
     classifier: Weights,
+
+    const vector_len = std.simd.suggestVectorLength(f32) orelse 8;
+    const Vec = @Vector(vector_len, f32);
 
     /// Initialize the Transformer weight pointers with the provided file.
     fn init(model_path: []u8, config: Config) !TransformerV1 {
@@ -683,6 +766,7 @@ const TransformerV1 = struct {
         std.debug.assert(fsize == used_size); // make sure we read the whole file.
 
         return TransformerV1{
+            .config = config,
             .fd = fd,
             .ptr = ptr,
 
@@ -709,5 +793,229 @@ const TransformerV1 = struct {
         std.posix.munmap(self.ptr.?);
         self.ptr = null;
         self.fd = -1;
+    }
+
+    /// Calculate a forward pass of the transformer with the next token `token` at
+    /// position `n_token`.
+    fn forward(self: Self, state: *State, token: Tokenizer.Token, n_token: usize) []f32 {
+        const c = self.config;
+
+        const token_offset: usize = @as(usize, @intCast(token)) * c.dim;
+        const embeddings = self.token_embed[token_offset .. token_offset + c.dim];
+        @memcpy(state.input[0..], embeddings);
+
+        const kv_dim = c.dim * c.n_kv_heads / c.n_heads;
+
+        for (0..c.n_layers) |i| {
+            // Each "layer" is a TransformerBlock.
+
+            // In TransformerBlock.__init__():
+            //     attention = Attention(...)
+            //     attention_norm = RMSNorm(...)
+            //     ffn_norm = RMSNorm(...)
+            //     feed_forward = FeedForward(dim, hidden_dim, ...)
+            //
+            // Each TransformerBlock.forward(x):
+            //     h = x + attention.forward(attention_norm(input, freq_cs, freq_ss))
+            //     out = h + feed_forward.forward(ffn_norm(h))
+            //     return out
+            //
+            // In FeedForward.__init__():
+            //     w1 = Linear(dim, hidden_dim, bias=False)
+            //     w2 = Linear(hidden_dim, dim, bias=False)
+            //     w3 = Linear(dim, hidden_dim, bias=False)
+            // In Feedforward.forward(x):
+            //     dropout(w1(F.silu(
+            //                w1(x) * w3(x)
+            //            )))
+            // where F.silu = torch.nn.functional.silu
+            // which is silu(x) = x (elementwise *) σ(x), where σ(x) is logistic sigmoid
+            //
+            // In Attention.__init__():
+            //     # sets some constants known through `Config` already
+            //     # NB: model_parallel_size = 1
+            //     # NB: n_local_heads = n_heads
+            //     n_rep = n_heads // n_kv_heads
+            //     head_dim = dim // n_heads
+            //     # NB: `bias=False` for all `Linear` layers here
+            //     wq = Linear(dim, n_heads * head_dim)
+            //     wk = Linear(dim, n_kv_heads * head_dim)
+            //     wv = Linear(dim, n_kv_heads * head_dim)
+            //     wo = Linear(n_heads * head_dim, dim)
+            //     Ignore dropout
+            //
+            // In Attention.forward(x, freq_cs, freq_ss):
+            //     bsz, seqlen, _ = x.shape
+            //     xq, xk, xv = wq(x), wk(x), wv(x)
+            //     xq = xq.view(bsz, seqlen, n_local_heads, head_dim)
+            //     xk = xq.view(bsz, seqlen, n_local_kv_heads, head_dim)
+            //     xv = xq.view(bsz, seqlen, n_local_kv_heads, head_dim)
+            //
+            //    # RoPE
+            //    xq, xk = apply_rotary_emb(xq, xk, freq_cs, freq_ss)
+            //
+            //    # Batch MQ attention: expand out keys & values
+            //    xk = repeat_kv(xk, n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            //    xv = repeat_kv(xv, n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            //
+            //    xq = xq.transpose(1, 2)    # (bs, n_local_heads, seqlen, head_dim)
+            //    xk = xk.transpose(1, 2)
+            //    xv = xv.transpose(1, 2)
+            //
+            //    # Then flash attention or manual impl.
+            //    # Manual attention:
+            //    scores = matmul(xq, xk.transpose(2, 3)) / math.sqrt(head_dim)
+            //    scores = scores + self.mask[:, :, :seqlen, :seqlen]
+            //    scores = F.softmax(scores.float, dim=-1).type_as(xq)
+            //    output = matmul(scores, xv)
+            //
+            //    output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            //
+            //    output = wo(output)
+            //    return wo(output)
+
+            // TransformerBlock.forward()
+            // first handle the `attention_norm` call.
+            const rms_offset = i * c.dim;
+            rmsNorm(state.residual, state.input, self.rms_attention[rms_offset .. rms_offset + c.dim]);
+
+            // TODO: Don't know if anything below this is correct.
+
+            // Now handle attention matrix multiplies
+            // xq = wq(x)
+            const wq = self.w_q[i * c.dim * c.dim .. (i + 1) * c.dim * c.dim][0 .. c.dim * c.dim];
+            matrixMul(state.q, wq, state.residual, c.dim, c.dim);
+
+            // xk = wk(x)
+            const kv_offset = i * c.dim * kv_dim;
+            const kv_end = kv_offset + c.dim;
+            const wk = self.w_k[i * c.dim * kv_dim .. (i + 1) * c.dim * kv_dim][0 .. c.dim * kv_dim];
+            matrixMul(state.k[kv_offset..kv_end], wk, state.residual, c.dim, kv_dim);
+
+            // xv = wv(x)
+            const wv = self.w_v[i * c.dim * c.dim .. (i + 1) * c.dim * kv_dim][0 .. c.dim * kv_dim];
+            matrixMul(state.v[kv_offset..kv_end], wv, state.residual, c.dim, kv_dim);
+
+            std.debug.print("TODO: Handle layer {d} with token {d} and n_token {d}\n", .{ i, token, n_token });
+        }
+
+        // After the layers the hidden layer is normalized
+
+        // Then logits are found
+
+        return state.output;
+    }
+
+    /// Perform RMS Normalization on `x` with the weights `y` and store the result in `out`.
+    /// Requires all inputs to have the same length.
+    ///
+    /// This method mirrors the implementation of `RMSNorm` in Meta's `model.py`.
+    /// It implements the method described in [1], plus adds a small epsilon factor for numeric
+    /// stability.
+    /// [1]: https://arxiv.org/abs/1910.07467
+    fn rmsNorm(out: []f32, x: []const f32, y: []const f32) void {
+        if (!(x.len == y.len and y.len == out.len)) {
+            std.debug.print("lengths: out={d}, x={d}, y={d}\n", .{ out.len, x.len, y.len });
+            std.debug.assert(out.len == x.len);
+            std.debug.assert(x.len == y.len);
+            @panic("Mismatched lengths");
+        }
+
+        const chunks = x.len / vector_len;
+        const leftover_offset = chunks * vector_len;
+
+        var sum: f32 = 0;
+        for (0..chunks) |i| {
+            const idx = i * vector_len;
+            const xs: Vec = x[idx .. idx + vector_len][0..vector_len].*;
+            const square = xs * xs;
+            const chunk_sum = @reduce(.Add, square);
+            sum += chunk_sum;
+        }
+
+        for (leftover_offset..x.len) |i| {
+            const xs = x[i];
+            const square = xs * xs;
+            sum += square;
+        }
+
+        const epsilon = 1e-5;
+        const x_f32: f32 = @floatFromInt(x.len);
+        const mean = (sum + epsilon) / x_f32;
+        const root = std.math.sqrt(mean);
+
+        // Now perform division + multiply by weights.
+        const divisor: Vec = @splat(root);
+        for (0..chunks) |i| {
+            const idx = i * vector_len;
+            const xs: Vec = x[idx .. idx + vector_len][0..vector_len].*;
+            const ys: Vec = y[idx .. idx + vector_len][0..vector_len].*;
+
+            const result = xs * ys / divisor;
+            // The Zig compiler lets you got slice → vector, but doesn't like the following line:
+            //out[idx .. idx + vector_len][0..vector_len] = result;
+            out[idx .. idx + vector_len][0..vector_len].* = result;
+            //@memcpy(out[idx .. idx + vector_len], result);
+        }
+
+        for (leftover_offset..x.len) |i| {
+            const xs = x[i];
+            const ys = y[i];
+
+            const result = xs * ys / root;
+            out[i] = result;
+        }
+    }
+
+    /// Multiply a matrix `m` of (`rows`, `cols`) by a vector `x` of (`cols`) and store in `out`.
+    fn matrixMul(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: usize) void {
+        std.debug.print("out: {d}, m: {d}, x: {d}, rows: {d}, cols: {d}\n", .{ out.len, m.len, x.len, rows, cols });
+        std.debug.assert(out.len == rows);
+        std.debug.assert(x.len == cols);
+        std.debug.assert(m.len == rows * cols);
+
+        const chunks = x.len / vector_len;
+        const leftover_offset = chunks * vector_len;
+
+        //var sum: usize = 0;
+        for (0..rows) |row| {
+            const m_off = row * cols;
+
+            var sum: f32 = 0;
+            for (0..chunks) |chunk| {
+                const idx = chunk * vector_len;
+                const m_idx = m_off + idx;
+                const xs: Vec = x[idx .. idx + vector_len][0..vector_len].*;
+                const ms: Vec = m[m_idx .. m_idx + vector_len][0..vector_len].*;
+
+                const prod = xs * ms;
+                const chunk_sum = @reduce(.Add, prod);
+                sum += chunk_sum;
+            }
+
+            for (leftover_offset..cols) |i| {
+                const xs = x[i];
+                const ms = m[m_off + i];
+                sum += xs * ms;
+            }
+
+            out[row] = sum;
+        }
+    }
+};
+
+const Params = struct {
+    temperature: f32,
+    top_p: f32,
+    random: std.Random,
+
+    fn init(temperature: f32, top_p: f32) Params {
+        const now = std.time.milliTimestamp();
+        const rng = std.Random.Xoroshiro128.init(@bitCast(now));
+        return .{
+            .temperature = temperature,
+            .top_p = top_p,
+            .random = rng,
+        };
     }
 };

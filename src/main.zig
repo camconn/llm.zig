@@ -155,7 +155,7 @@ const Config = struct {
 };
 
 /// Temporarily open the checkpoint file to read only the header.
-/// Do not leave the file open because we ill mmap it.
+/// Do not leave the file open because we will mmap it.
 fn read_config(model_path: []u8) !Config {
     const model_file = try std.fs.openFileAbsolute(model_path, .{ .mode = .read_only });
     // TODO: Use relative path support

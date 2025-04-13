@@ -298,16 +298,15 @@ const Tokenizer = struct {
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
     /// The caller is responsible for freeing the returned tokens from `token_alloc`.
-    fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Token {
+    fn encode(self: Self, text: []const u8, alloc: Allocator) ![]Token {
         // TODO: Handle un-encodable symbols with `<UNK>` or `UNK` token.
 
         // Optimistically assume we will output the entire text character
         // as a token.
-        var output = std.ArrayList(Token).init(token_alloc);
-        defer output.deinit();
 
         // Make a heuristic guess about how long our tokenized sequence will be
-        try output.ensureTotalCapacity(text.len >> 2);
+        var output_final = std.ArrayList(Token).init(alloc);
+        try output_final.ensureTotalCapacity(text.len >> 2);
 
         const slice = self.tokens.slice();
         const chars = slice.items(.chars);
@@ -319,9 +318,23 @@ const Tokenizer = struct {
         // Llama 2's tokenizer happens to use this setting, so go ahead and add a single space
         // in front of all tokens we search for.
         // This will be merged in the merge step so that [" ", "hello"] becomes [" hello"]
-        const space = lookupIndex(self.tokens.items(.chars), SPACE_PIECE).?;
+        const space = lookupIndex(chars, SPACE_PIECE).?;
         // space's token ID is 35, but don't hard-code that for now
-        try output.append(ids[space]);
+        const space_id = ids[space];
+
+        // Use a SinglyLinkedList because we are going to be repeatedly removing nodes later
+        // and linked lists have the best behavior for that.
+        const Out = std.SinglyLinkedList(Token);
+        const Node = Out.Node;
+        var space_node = Node{ .data = space_id };
+        const tokens = Out{ .first = &space_node };
+        var last: *Node = &space_node;
+
+        // Force using an arena allocator because the zig compiler freaks out whenever
+        // calling `alloc.free(*Node)`
+        var arena = ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        var token_alloc = arena.allocator();
 
         var idx: usize = 0;
         // BPE-like Search algorithm
@@ -339,7 +352,11 @@ const Tokenizer = struct {
             }
 
             if (match) |found| {
-                try output.append(found.id);
+                var next = try token_alloc.create(Node);
+                next.data = found.id;
+                last.insertAfter(next);
+                last = next;
+
                 //std.debug.print("old idx={d}, out_i={d}\n", .{ idx, output.items.len });
                 idx += found.chars.len;
                 //std.debug.print("new idx: {d}\n", .{idx});
@@ -351,7 +368,11 @@ const Tokenizer = struct {
                 // Fall back and just use the single char as the token value.
                 // TODO: Figure out how to handle Unicode here.
                 const token_id: Token = @intCast(text[idx] + 3);
-                try output.append(token_id);
+
+                var next = try token_alloc.create(Node);
+                next.data = token_id;
+                last.insertAfter(next);
+                last = next;
 
                 idx += 1;
                 continue :search;
@@ -366,47 +387,55 @@ const Tokenizer = struct {
         var buf: [64]u8 = undefined;
         while (true) {
             var best: f32 = -1e10;
-            var best_merge: ?TokenEntry = null;
-            var best_idx: usize = 0;
+            var best_id: ?Token = null;
+            var best_idx: ?*Node = null;
 
-            for (0..output.items.len - 1) |i| {
-                //std.debug.print("merge with i={d}\n", .{i});
+            var node = tokens.first;
 
-                const left_idx = findTokenById(ids, output.items[i]).?;
-                const right_idx = findTokenById(ids, output.items[i + 1]).?;
+            while (node.?.next) |next| {
+                const left_idx = findTokenById(ids, node.?.data).?;
+                const right_idx = findTokenById(ids, next.data).?;
 
                 const left_chars = chars[left_idx];
                 const right_chars = chars[right_idx];
 
                 const combined = try std.fmt.bufPrint(&buf, "{s}{s}", .{ left_chars, right_chars });
-                //std.debug.print("Trying to merge <<{s}>>\n", .{combined});
                 if (lookupIndex(chars, combined)) |index| {
                     if (scores[index] > best) {
                         best = scores[index];
-                        best_idx = i;
-                        best_merge = self.tokens.get(index);
+                        best_idx = node;
+                        best_id = ids[index];
                     }
                 }
+
+                node = next;
             }
 
-            if (best_merge) |have_better| {
-                // zig fmt: off
-                //const left_id = output.items[i];
-                //const right_id = output.items[i + 1];
-                //std.debug.print("Merged tokens (id={d}) <<{s}>> and (id={d}) <<{s}>> into token {d} <<{s}>>\n",
-                //                .{ left_id, left_chars, right_id, right_chars, have_better.id, have_better.chars });
-                // zig fmt: on
-                _ = output.orderedRemove(best_idx);
-                output.items[best_idx] = have_better.id;
+            if (best_idx) |best_node| {
+                //const left_id = best_node.data;
+                //const right_id = best_node.next.?.data;
+                //std.debug.print("Merging token {d} with {d}\n", .{ left_id, right_id });
 
-                // Don't increment `i` and try to merge again.
+                // Replace value of the lefthand side with the merged value.
+                // Delete the next node.
+                best_node.data = best_id.?;
+                _ = best_node.removeNext(); // don't free, used arena
             } else {
+                // found nothing to merge, that means we're done
                 break;
             }
         }
 
+        // Iterate built list and add it to arraylist for final export
+        var node = tokens.first;
+        while (node) |inner| {
+            try output_final.append(inner.data);
+            node = inner.next;
+            // don't free, used arena
+        }
+
         // Shrink output to final size
-        return output.toOwnedSlice();
+        return output_final.toOwnedSlice();
     }
 
     const Searcher = struct {

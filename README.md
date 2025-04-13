@@ -53,10 +53,69 @@ not shared_classifier (separate model.output) shape: torch.Size([32000, 4096])
 wrote llama2-7b.bin
 ```
 
+## SentencePiece Settings
+Dumped `sentencepice` settings from `tokenizer.model` to better replicate llama
+2's behavior.
+
+```
+>>> import sentencepiece.sentencepiece_model_pb2
+>>> mp = sentencepiece.sentencepiece_model_pb2.ModelProto()
+>>> mp.ParseFromString(open("/run/user/1000/kio-fuse-iuNegU/smb/SAMBA_SERVER/llama-2/tokenizer.model", 'rb').read())
+499723
+>>> print(mp.trainer_spec)
+input: "/large_experiments/theorem/datasets/MERGED/all.test1.merged"
+model_prefix: "spm_model_32k_200M_charcov099995_allowWSO__v2"
+model_type: BPE
+vocab_size: 32000
+self_test_sample_size: 0
+input_format: "text"
+character_coverage: 0.99995
+input_sentence_size: 200000000
+seed_sentencepiece_size: 1000000
+shrinking_factor: 0.75
+num_threads: 80
+num_sub_iterations: 2
+max_sentence_length: 4192
+shuffle_input_sentence: true
+max_sentencepiece_length: 16
+split_by_unicode_script: true
+split_by_whitespace: true
+split_by_number: true
+treat_whitespace_as_suffix: false
+split_digits: true
+allow_whitespace_only_pieces: true
+vocabulary_output_piece_score: true
+hard_vocab_limit: true
+use_all_vocab: false
+byte_fallback: true
+required_chars: ""
+unk_id: 0
+bos_id: 1
+eos_id: 2
+pad_id: -1
+unk_surface: " ⁇ "
+unk_piece: "<unk>"
+bos_piece: "<s>"
+eos_piece: "</s>"
+pad_piece: "<pad>"
+train_extremely_large_corpus: false
+enable_differential_privacy: false
+differential_privacy_noise_level: 0
+differential_privacy_clipping_threshold: 0
+
+>>> print(mp.normalizer_spec)
+name: "identity"
+precompiled_charsmap: ""
+add_dummy_prefix: true
+remove_extra_whitespaces: false
+normalization_rule_tsv: ""
+```
+
+
 # TODO
 - [x] Load/parse the tokenizer + model
 - [ ] Tokenizer
-  - [ ] Encode string -> tokens
+  - [x] Encode string -> tokens
   - [ ] Decode tokens -> string
   - [ ] Add tests vs sentencepiece
 - [ ] RoPE

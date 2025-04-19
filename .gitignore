@@ -4,7 +4,7 @@ zig-out
 
 # Editor files
 *.swp
-.\#*
+**/\.\#*
 
 # Models
 llama2-7b.bin

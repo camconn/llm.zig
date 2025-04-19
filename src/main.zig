@@ -19,6 +19,7 @@ pub fn main() !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help             Display this help and exit.
         \\-m, --model <str>      Path to the model to use
+        \\-t, --tokenizer <str>  Path to the tokenizer to use
         \\-p, --prompt <str>     Prompt to use
         \\
     );
@@ -46,7 +47,7 @@ pub fn main() !void {
 
     var alloc = gpa.allocator();
 
-    const model_path = "/home/cam/dev/llama2.c/llama2-7b.bin";
+    const model_path = if (res.args.model) |model| model else "llama2-7b.bin";
     const config = try read_config(model_path);
     try stdout.print("loaded config\n", .{});
     try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}, shared_classifier: {}\n", .{
@@ -59,21 +60,21 @@ pub fn main() !void {
         config.max_seq_length,
         config.shared_classifier,
     });
-    try bw.flush();
 
     var prompt: []u8 = undefined;
     if (res.args.prompt) |p| {
-        std.debug.print("Got prompt!\n", .{});
         prompt = try alloc.dupe(u8, p);
     } else {
-        std.debug.print("Falling back to default prompt\n", .{});
-        prompt = try alloc.dupe(u8, "Hello, world!");
+        try stdout.print("Falling back to default prompt\n", .{});
+        prompt = try alloc.dupe(u8, "Wikipedia the free online encyclopedia that");
     }
     defer alloc.free(prompt);
+    try bw.flush();
 
-    var tokenizer = try load_tokenizer("tokenizer.bin", alloc, config.vocab_size);
+    const tokenizer_path = if (res.args.tokenizer) |t_path| t_path else "tokenizer.bin";
+    var tokenizer = try load_tokenizer(tokenizer_path, alloc, config.vocab_size);
     defer tokenizer.deinit();
-    try stdout.print("loaded tokenizer\nmax tokenizer length: {d}\n", .{tokenizer.max_len});
+    try stdout.print("loaded tokenizer; max length: {d}\n", .{tokenizer.max_len});
     try bw.flush();
 
     var transformer = try TransformerV1.init(model_path, config);
@@ -102,6 +103,7 @@ pub fn main() !void {
     var token: Tokenizer.Token = undefined;
     var progress = std.Progress.start(.{ .root_name = "Predicting" });
     defer progress.end();
+    // TODO: Implement shifting whenever running for longer than `max_seq_length`
     while (n < config.max_seq_length) : (n += 1) {
         progress.setCompletedItems(n);
         if (n < tokens.len) {
@@ -123,11 +125,7 @@ pub fn main() !void {
         token = decoded;
     }
 
-    try stdout.print("Done with work.\n", .{});
-    try stdout.print("\n\n", .{});
-    try bw.flush();
-
-    try stdout.print("Cleaning up\n", .{});
+    try stdout.print("Done\nCleaning up\n", .{});
     try bw.flush();
 }
 
@@ -187,11 +185,23 @@ const Config = struct {
 /// Temporarily open the checkpoint file to read only the header.
 /// Do not leave the file open because we will mmap it.
 fn read_config(model_path: []const u8) !Config {
-    const model_file = try std.fs.openFileAbsolute(model_path, .{ .mode = .read_only });
-    // TODO: Use relative path support
-    defer model_file.close();
+    // First try to load the model with relative and then fallback to absolute path if that fails.
+    const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
+    const cwd = std.fs.cwd();
 
-    var buffer = std.io.bufferedReader(model_file.reader());
+    // zig fmt: off
+    const file: ?std.fs.File = cwd.openFile(model_path, options)
+        // Fall back to absolute path
+        catch (std.fs.openFileAbsolute(model_path, options) catch null);
+    // zig fmt: on
+
+    if (file == null) {
+        std.debug.print("Could open model file: {s}\nIs the path correct?\n", .{model_path});
+        return std.fs.File.OpenError.FileNotFound;
+    }
+    defer file.?.close();
+
+    var buffer = std.io.bufferedReader(file.?.reader());
     return try Config.read(buffer.reader());
 }
 
@@ -495,14 +505,24 @@ const Tokenizer = struct {
     }
 };
 
-fn load_tokenizer(tokenizer_file: []const u8, alloc: Allocator, vocab_size: usize) !Tokenizer {
-    // open the file with fallback, then hand off to the tokenizer
+fn load_tokenizer(file_path: []const u8, alloc: Allocator, vocab_size: usize) !Tokenizer {
+    // First try to load the model with relative and then fallback to absolute path if that fails.
+    const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
     const cwd = std.fs.cwd();
-    const tokenizer = try cwd.openFile(tokenizer_file, .{ .mode = .read_only });
-    defer tokenizer.close();
 
-    var buffer = std.io.bufferedReader(tokenizer.reader());
+    // zig fmt: off
+    const file: ?std.fs.File = cwd.openFile(file_path, options)
+        // Fall back to absolute path
+        catch (std.fs.openFileAbsolute(file_path, options) catch null);
+    // zig fmt: on
 
+    if (file == null) {
+        std.debug.print("Could not open tokenizer file: {s}\nIs the path correct?\n", .{file_path});
+        return std.fs.File.OpenError.FileNotFound;
+    }
+    defer file.?.close();
+
+    var buffer = std.io.bufferedReader(file.?.reader());
     return try Tokenizer.read(buffer.reader(), alloc, vocab_size);
 }
 

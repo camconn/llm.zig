@@ -6,3 +6,6 @@ zig-out
 *.swp
 .\#*
 
+# Models
+llama2-7b.bin
+tokenizer.bin

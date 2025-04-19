@@ -1,16 +1,69 @@
 
-# LLM.zig
-A project to implement LLMs in Ziglang.
+# llm.zig
+A project to implement LLMs in Zig.
 
-# Scope
-Initially, this project will aim at implementing GPT or LLAMA 2.
+This project implements inference for LLMs *from scratch* without third
+party libraries[^1].
 
-# Details
-Details about the model weights file.
+[^1]: The Zig standard library is used. 3rd party libraries
+like [zig-clap](https://github.com/Hejsil/zig-clap) are used, but only for
+non-AI code like parsing CLI arguments.
 
-## Version 0
+## Implemented
+- LLaMA 2
+    - SentencePiece-like tokenization
+    - Key-Value caching
+    - Loading "V1" models exported from Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c).
+
+## Outside Scope
+Things this library doesn't do:
+- Full model loading support from `pytorch`, `xformers`, JAX, etc.
+- Training or fine-tuning
+
+## Future
+In the future other architectures such as mingpt, nanogpt, LLaMA3, etc. may be added.
+
+# Setup
+Models need their weights setup in a proper format to run.
+
+## LLaMA
+How to setup LLaMA 2 inference:
+
+1. Download the LLaMA 2 (full fp32 weights) weights.
+2. Export the weights using the [llama2.c](https://github.com/karpathy/llama2.c) `export.py` script for version 1:
 ```
-$ python3 export.py --version 0 --meta-llama /run/user/1000/kio-fuse-iuNegU/NETWORK_SERVER/Shared/AI/llama-2/llama-2-7b/ llama2-7b-0.bin
+$ python3 export.py --version 1 --meta-llama /path/to/llama-2-7b/ llama2-7b.bin
+```
+3. Export download a copy of
+[`tokenizer.bin`](https://github.com/karpathy/llama2.c/blob/master/tokenizer.bin)
+or export a copy yourself using the script from `llama2.c`:
+```
+$ python3 tokenizer.py --tokenizer-model=/path/to/llama2/tokenizer.model
+```
+4. Build the code and run with `zig build run -Doptimize=ReleaseSafe --`
+```
+$ zig build run -Doptimize=ReleaseSafe -- --prompt='Zebras are primarily grazers and can subsist on lower-quality vegetation. They are preyed on mainly by'
+```
+
+# Licensing
+The code in `llm.zig` is licensed under the GNU Public License Version 3 or any
+later version at your choosing. A copy of this license is located in
+`LICENSE.txt`.
+
+# TODO
+- Nanogpt or mingpt
+    - Probably going to do nano
+
+# Notes
+Various development notes about model loading and are located below. Most people
+should disregard this section.
+
+## LLaMA
+Notes about LLaMA exports from llama2.py
+
+### Version 0
+```
+$ python3 export.py --version 0 --meta-llama /path/to/llama-2-7b/ llama2-7b-0.bin
 {'dim': 4096, 'multiple_of': 256, 'n_heads': 32, 'n_layers': 32, 'norm_eps': 1e-05, 'vocab_size': -1}
 layers len: 32
 tok_embeddings shape: torch.Size([32000, 4096])
@@ -35,7 +88,7 @@ wrote llama2-7b-0.bin
 ## Version 1
 Output from a modified `export.py` file from `llama2.c`:
 ```
-$ python3 export.py --version 1 --meta-llama /run/user/1000/kio-fuse-iuNegU/NETWORK_SERVER/Shared/AI/llama-2/llama-2-7b/ llama2-7b.bin
+$ python3 export.py --version 1 --meta-llama /path/to/llama-2-7b/ llama2-7b.bin
 {'dim': 4096, 'multiple_of': 256, 'n_heads': 32, 'n_layers': 32, 'norm_eps': 1e-05, 'vocab_size': -1}
 layers len: 32
 attention shape: torch.Size([4096])
@@ -53,14 +106,14 @@ not shared_classifier (separate model.output) shape: torch.Size([32000, 4096])
 wrote llama2-7b.bin
 ```
 
-## SentencePiece Settings
+### SentencePiece Settings
 Dumped `sentencepice` settings from `tokenizer.model` to better replicate llama
 2's behavior.
 
 ```
 >>> import sentencepiece.sentencepiece_model_pb2
 >>> mp = sentencepiece.sentencepiece_model_pb2.ModelProto()
->>> mp.ParseFromString(open("/run/user/1000/kio-fuse-iuNegU/smb/SAMBA_SERVER/llama-2/tokenizer.model", 'rb').read())
+>>> mp.ParseFromString(open("/path/to/llama-2/tokenizer.model", 'rb').read())
 499723
 >>> print(mp.trainer_spec)
 input: "/large_experiments/theorem/datasets/MERGED/all.test1.merged"
@@ -110,24 +163,3 @@ add_dummy_prefix: true
 remove_extra_whitespaces: false
 normalization_rule_tsv: ""
 ```
-
-
-# TODO
-- [x] Load/parse the tokenizer + model
-- [ ] Tokenizer
-  - [x] Encode string -> tokens
-  - [ ] Decode tokens -> string
-  - [ ] Add tests vs sentencepiece
-- [ ] RoPE
-- [ ] MatMul
-- [ ] SwiGLU
-- [ ] Attention
-  - [ ] Caching (optional, may be helpful for iteration/speed)
-- [ ] Feed Forward
-- [ ] Softmax
-- [ ] Logits/Sample
-
-
-# Notes
-Will probably be useful to use `std.math.Complex` for the RoPE stuff w/ complex
-#s in a `@Vector`.

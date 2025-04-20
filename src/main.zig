@@ -12,6 +12,8 @@ const clap = @import("clap");
 const GPA = std.heap.GeneralPurposeAllocator(.{});
 const ArenaAllocator = std.heap.ArenaAllocator;
 
+const print_perf = false;
+
 pub fn main() !void {
     var gpa = GPA{};
     defer _ = gpa.deinit();
@@ -103,6 +105,9 @@ pub fn main() !void {
     var token: Tokenizer.Token = undefined;
     var progress = std.Progress.start(.{ .root_name = "Predicting" });
     defer progress.end();
+
+    const start_time = try std.time.Instant.now();
+
     // TODO: Implement shifting whenever running for longer than `max_seq_length`
     while (n < config.max_seq_length) : (n += 1) {
         progress.setCompletedItems(n);
@@ -116,6 +121,16 @@ pub fn main() !void {
 
         const out = transformer.forward(&state, token, n, progress);
         const decoded = try picker.sample(out, alloc);
+
+        if (comptime print_perf) {
+            const now = try std.time.Instant.now();
+            const elapsed_millis = now.since(start_time) / 1_000_000;
+            const elapsed_secs = @as(f32, @floatFromInt(elapsed_millis)) / 1000;
+            const per_token = @as(f32, @floatFromInt(elapsed_millis)) / (@as(f32, @floatFromInt(n + 1)));
+            try stdout.print("{d} ms since start. cum: {d:.2} ms per token\n", .{
+                elapsed_secs, per_token,
+            });
+        }
 
         const idx = tokenizer.findIndexByTokenId(decoded).?;
         const chars = tokenizer.tokens.items(.chars)[idx];
@@ -842,13 +857,25 @@ const TransformerV1 = struct {
         const fsize: u64 = @intCast(stat.size);
 
         // See `std.os.linux.MAP` for more info.
-        //std.os.linux.MAP
         const mmap_type: std.posix.MAP = .{
-            .TYPE = .PRIVATE,
+            .TYPE = .SHARED,
+            // Linux-only flags
+            // Don't reserve swap pages
+            .NORESERVE = true,
+            // Try to populate all of the pages in memory (pre-read) if possible
+            .POPULATE = true,
         };
 
         const ptr = try std.posix.mmap(null, fsize, std.posix.PROT.READ, mmap_type, fd, 0);
         errdefer std.posix.munmap(ptr);
+
+        // Tell the kernel we expect to do sequential reads and that we will need the
+        // mapped file in the near future.
+        //
+        // When measuring this it makes layer times more consistent, especially for the first
+        // few iterations of `Transformer.forward()`
+        const madvise_flags = std.posix.MADV.SEQUENTIAL | std.posix.MADV.WILLNEED;
+        try std.posix.madvise(ptr.ptr, fsize, madvise_flags);
 
         // V1 Export Format from `llama2.c`
         // The first 256 bytes contain the header with trailing 0 padding.
@@ -956,6 +983,7 @@ const TransformerV1 = struct {
     fn deinit(self: *Self) void {
         std.debug.print("Transformer.deinit()\n", .{});
         std.posix.munmap(self.ptr.?);
+        std.posix.close(self.fd);
         self.ptr = null;
         self.fd = -1;
     }

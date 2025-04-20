@@ -767,12 +767,11 @@ pub const TransformerV1 = struct {
 
         // Here we mmap() the weights files because nobody wants to open up a 25 GB file raw!
         const stat = try std.posix.fstat(fd);
+        const fsize: u64 = @intCast(stat.size);
         std.debug.print(
             "Model size: {d:.1} MiB\n",
-            .{@as(f32, @floatFromInt(stat.size)) / 1048576.0},
+            .{@as(f32, @floatFromInt(fsize)) / 1048576.0},
         );
-
-        const fsize: u64 = @intCast(stat.size);
 
         // See `std.os.linux.MAP` for more info.
         const mmap_type: std.posix.MAP = .{

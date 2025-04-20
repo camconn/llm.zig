@@ -658,7 +658,7 @@ const State = struct {
             config.dim,
             config.n_heads,
             config.max_seq_length,
-            alloc,
+            a,
         );
 
         return .{
@@ -694,6 +694,7 @@ const State = struct {
 ///
 /// Returns two slices of coefficients corresponding to the `cos(m θ_n)` or `sin(m θ_n)` values
 /// within the element-wise product of R^d_{Θ,m}x found in section 3.4.2 of the RoFormer paper [1].
+/// Note that the implementation here uses a different definition of θ_i than the original paper.
 ///
 /// Based on `precompute_freqs_cis` from Meta's LLaMA.
 /// [1]: https://arxiv.org/abs/2104.09864v5
@@ -703,38 +704,87 @@ fn precompute_frequencies(
     len: usize,
     allocator: Allocator,
 ) !struct { []f32, []f32 } {
-    const compute_len = dim * len;
     const head_size = dim / n_heads;
+    std.debug.assert(head_size & 1 == 0); // `head_size` must be divisible by 2.
+    // We only compute half the number of coefficients in a head of `head_size` because RoPE
+    // collapses a head of size d → d/2.
+    const half_head = head_size / 2;
+    const compute_len = len * half_head;
 
-    var sines = try allocator.alloc(f32, compute_len);
-    errdefer allocator.free(sines);
-    var cosines = try allocator.alloc(f32, compute_len);
-    errdefer allocator.free(cosines);
+    var sin = try allocator.alloc(f32, compute_len);
+    errdefer allocator.free(sin);
+    var cos = try allocator.alloc(f32, compute_len);
+    errdefer allocator.free(cos);
 
     //std.debug.print("dim: {d}; len: {d}; compute: {d}\n", .{ dim, len, compute_len });
     //std.debug.print("heads: {d}; head_size: {d}; prod {d}\n", .{ n_heads, head_size, n_heads * head_size });
 
-    for (0..len) |n| {
-        for (0..n_heads) |h| {
-            for (0..head_size) |hd| {
-                const hd_float: f32 = @floatFromInt(hd);
-                // This isn't the same power value as the RoFormer paper, but it's equivalent to
-                // what the llama implementation uses
-                const pow = hd_float / @as(f32, @floatFromInt(head_size));
-                const theta = std.math.pow(f32, 10_000, -1 * pow);
-                const m_theta = @as(f32, @floatFromInt(n)) * theta;
+    const head_size_f: f32 = @floatFromInt(head_size);
 
-                const m_cos = std.math.cos(m_theta);
-                const m_sin = std.math.sin(m_theta);
+    for (0..len) |m| {
+        const m_f: f32 = @floatFromInt(m);
+        for (0..half_head) |hd| {
+            // The cosine embedding for token #m at head position #h is a function of the position
+            // on the head (h) and the token (m)
+            // m_cos(m, h) = cos(m * theta)
+            //             = cos(m * pow(10_000 * -1 * pow))
+            //             = cos(m * pow(10_000 * -1 * (h / head_size)))
+            // and likewise with m_sin(n, h)
 
-                const i = dim * n + head_size * h + hd;
-                sines[i] = m_sin;
-                cosines[i] = m_cos;
-            }
+            // Recover original head position by doubling since we are iterating over half of
+            // the head size.
+            const h_f: f32 = @floatFromInt(hd * 2);
+
+            const pow = h_f / head_size_f;
+            const theta = std.math.pow(f32, 10_000, -1 * pow);
+            const m_theta = m_f * @as(f32, @floatCast(theta));
+
+            const m_cos = std.math.cos(m_theta);
+            const m_sin = std.math.sin(m_theta);
+
+            const i = half_head * m + hd;
+
+            sin[i] = m_sin;
+            cos[i] = m_cos;
+        }
+    }
+    return .{ sin, cos };
+}
+
+test "check precompute_frequencies static" {
+    // Precomputed coefficients as exported into "v0" llama2.c model file for llama2 7b.
+    const cos_file = @embedFile("assets/cos.json");
+    const sin_file = @embedFile("assets/sin.json");
+
+    const cos = try std.json.parseFromSlice([]f32, std.testing.allocator, cos_file, .{});
+    defer cos.deinit();
+    const sin = try std.json.parseFromSlice([]f32, std.testing.allocator, sin_file, .{});
+    defer sin.deinit();
+
+    const len = 2048;
+    const sin_actual, const cos_actual = try precompute_frequencies(4096, 32, len, std.testing.allocator);
+    defer std.testing.allocator.free(sin_actual);
+    defer std.testing.allocator.free(cos_actual);
+
+    try std.testing.expectEqual(sin.value.len, sin_actual.len);
+    try std.testing.expectEqual(cos.value.len, cos_actual.len);
+
+    const epsilon = 9e-3; // 1e-4 is too strict and fails
+    for (0..cos.value.len, cos.value, cos_actual) |i, exp, actual| {
+        if (!std.math.approxEqAbs(f32, exp, actual, epsilon)) {
+            const diff = @abs(exp - actual);
+            std.debug.print("Failure at cos index {d}: difference {d} exceeded {d}\n", .{ i, diff, epsilon });
+            try std.testing.expectApproxEqAbs(exp, actual, epsilon);
         }
     }
 
-    return .{ sines, cosines };
+    for (0..sin.value.len, sin.value, sin_actual) |i, exp, actual| {
+        if (!std.math.approxEqAbs(f32, exp, actual, epsilon)) {
+            const diff = @abs(exp - actual);
+            std.debug.print("Failure at sin index {d}: difference {d} exceeded {d}\n", .{ i, diff, epsilon });
+            try std.testing.expectApproxEqAbs(exp, actual, epsilon);
+        }
+    }
 }
 
 const Complex = std.math.Complex(f32);
@@ -753,13 +803,15 @@ fn apply_rope_embeddings(
     head_size: usize,
     n: usize,
 ) void {
-    for (0..n_heads) |hi| {
-        const base = n_heads * head_size * n;
-        const head_off = base + head_size * hi;
+    const half_head = head_size / 2;
 
+    // Base index of RoPe embeddings
+    const base = n * half_head;
+
+    for (0..n_heads) |hi| {
         var hd: usize = 0;
         while (hd < head_size) : (hd += 2) {
-            const ii = head_off + hd;
+            const ii = base + (hd / 2);
             const vi = hi * head_size + hd;
 
             // Rotate each unit pair v ∈ vector by mθ_i

@@ -1169,7 +1169,7 @@ const TransformerV1 = struct {
             // End of Attention.forward(x);
 
             // We are back in TransformerBlock.forward(x, freq_cs, freq_ss). We just need to add
-            // the vector we stored in `state.tmp` and add it to `x` then do a feed forward pass:
+            // the vector we stored in `state.work2` and add it to `x` then do a feed forward pass:
             //
             // def forward(self, x, few_cs, freq_ss):
             //     h = x + self.attention.forward(self.attention_norm(x), freqs_cs, freqs_ss)

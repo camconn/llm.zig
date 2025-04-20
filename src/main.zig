@@ -50,7 +50,7 @@ pub fn main() !void {
     var alloc = gpa.allocator();
 
     const model_path: []const u8 = res.args.model orelse "llama2-7b.bin";
-    const config = try read_config(model_path);
+    const config = try Config.read(model_path);
     try stdout.print("loaded config\n", .{});
     try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}, shared_classifier: {}\n", .{
         config.dim,
@@ -70,7 +70,7 @@ pub fn main() !void {
     try bw.flush();
 
     const tokenizer_path = res.args.tokenizer orelse "tokenizer.bin";
-    var tokenizer = try load_tokenizer(tokenizer_path, alloc, config.vocab_size);
+    var tokenizer = try Tokenizer.init(tokenizer_path, alloc, config.vocab_size);
     defer tokenizer.deinit();
     try stdout.print("Loaded tokenizer; max length: {d}\n", .{tokenizer.max_len});
 
@@ -141,7 +141,7 @@ pub fn main() !void {
     try bw.flush();
 }
 
-const Config = struct {
+pub const Config = struct {
     dim: usize,
     hidden_dim: usize,
     n_layers: usize,
@@ -152,8 +152,31 @@ const Config = struct {
 
     shared_classifier: bool,
 
+    /// Temporarily open the checkpoint file to read only the header.
+    /// Do not leave the file open because we will mmap it.
+    pub fn read(model_path: []const u8) !Config {
+        // First try to load the model with relative and then fallback to absolute path if that fails.
+        const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
+        const cwd = std.fs.cwd();
+
+        // zig fmt: off
+        const file: ?std.fs.File = cwd.openFile(model_path, options)
+            // Fall back to absolute path
+            catch (std.fs.openFileAbsolute(model_path, options) catch null);
+        // zig fmt: on
+
+        if (file == null) {
+            std.debug.print("Could open model file: {s}\nIs the path correct?\n", .{model_path});
+            return std.fs.File.OpenError.FileNotFound;
+        }
+        defer file.?.close();
+
+        var buffer = std.io.bufferedReader(file.?.reader());
+        return try Config.read_inner(buffer.reader());
+    }
+
     /// Read a "Version 1" `llama.bin` file as exported by `llama2.c/export.py`
-    fn read(reader: anytype) !Config {
+    fn read_inner(reader: anytype) !Config {
         // Assume the machine which exports the v1 file is Little-Endian, which make parsing
         // easier.
         // First, we have the header
@@ -194,30 +217,7 @@ const Config = struct {
     }
 };
 
-/// Temporarily open the checkpoint file to read only the header.
-/// Do not leave the file open because we will mmap it.
-fn read_config(model_path: []const u8) !Config {
-    // First try to load the model with relative and then fallback to absolute path if that fails.
-    const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
-    const cwd = std.fs.cwd();
-
-    // zig fmt: off
-    const file: ?std.fs.File = cwd.openFile(model_path, options)
-        // Fall back to absolute path
-        catch (std.fs.openFileAbsolute(model_path, options) catch null);
-    // zig fmt: on
-
-    if (file == null) {
-        std.debug.print("Could open model file: {s}\nIs the path correct?\n", .{model_path});
-        return std.fs.File.OpenError.FileNotFound;
-    }
-    defer file.?.close();
-
-    var buffer = std.io.bufferedReader(file.?.reader());
-    return try Config.read(buffer.reader());
-}
-
-const Tokenizer = struct {
+pub const Tokenizer = struct {
     // TODO: Read the original `sentencepiece.sentencepice_model_pb.ModelProto()` file instead
     //       to read original/custom `.model` files.
     const Self = @This();
@@ -236,6 +236,27 @@ const Tokenizer = struct {
     max_len: usize,
     arena: ArenaAllocator,
     token_to_idx: []usize,
+
+    pub fn init(file_path: []const u8, alloc: Allocator, vocab_size: usize) !Tokenizer {
+        // First try to load the model with relative and then fallback to absolute path if that fails.
+        const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
+        const cwd = std.fs.cwd();
+
+        // zig fmt: off
+        const file: ?std.fs.File = cwd.openFile(file_path, options)
+            // Fall back to absolute path
+            catch (std.fs.openFileAbsolute(file_path, options) catch null);
+        // zig fmt: on
+
+        if (file == null) {
+            std.debug.print("Could not open tokenizer file: {s}\nIs the path correct?\n", .{file_path});
+            return std.fs.File.OpenError.FileNotFound;
+        }
+        defer file.?.close();
+
+        var buffer = std.io.bufferedReader(file.?.reader());
+        return try Tokenizer.read(buffer.reader(), alloc, vocab_size);
+    }
 
     /// Read an exported Tokenizer model as exported by `llama2.c/tokenizer.py`
     /// Any scores and bytes read will be allocated with the supplied `Allocator` and only
@@ -335,7 +356,7 @@ const Tokenizer = struct {
         }
     }
 
-    fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self) void {
         self.tokens.deinit(self.arena.allocator());
         self.arena.deinit();
     }
@@ -355,7 +376,7 @@ const Tokenizer = struct {
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
     /// The caller is responsible for freeing the returned tokens from `token_alloc`.
-    fn encode(self: Self, text: []const u8, alloc: Allocator) ![]Token {
+    pub fn encode(self: Self, text: []const u8, alloc: Allocator) ![]Token {
         // TODO: Handle un-encodable symbols with `<UNK>` or `UNK` token.
 
         // Optimistically assume we will output the entire text character
@@ -512,36 +533,16 @@ const Tokenizer = struct {
     }
 
     /// Find a token by its index in `tokens`.
-    fn findIndexByTokenId(self: Self, token: Token) ?usize {
+    pub fn findIndexByTokenId(self: Self, token: Token) ?usize {
+        // TODO: find a better path to make this private
         return self.token_to_idx[@intCast(token)];
     }
 };
 
-fn load_tokenizer(file_path: []const u8, alloc: Allocator, vocab_size: usize) !Tokenizer {
-    // First try to load the model with relative and then fallback to absolute path if that fails.
-    const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
-    const cwd = std.fs.cwd();
-
-    // zig fmt: off
-    const file: ?std.fs.File = cwd.openFile(file_path, options)
-        // Fall back to absolute path
-        catch (std.fs.openFileAbsolute(file_path, options) catch null);
-    // zig fmt: on
-
-    if (file == null) {
-        std.debug.print("Could not open tokenizer file: {s}\nIs the path correct?\n", .{file_path});
-        return std.fs.File.OpenError.FileNotFound;
-    }
-    defer file.?.close();
-
-    var buffer = std.io.bufferedReader(file.?.reader());
-    return try Tokenizer.read(buffer.reader(), alloc, vocab_size);
-}
-
 test "Tokenizer.encode" {
     const tok_path = try std.testing.allocator.dupe(u8, "tokenizer.bin");
     defer std.testing.allocator.free(tok_path);
-    var tokenizer = try load_tokenizer(tok_path, std.testing.allocator, 32000);
+    var tokenizer = try Tokenizer.init(tok_path, std.testing.allocator, 32000);
     defer tokenizer.deinit();
 
     {
@@ -596,7 +597,7 @@ test "Tokenizer.encode" {
 }
 
 /// Represents the current state of a transformer.
-const State = struct {
+pub const State = struct {
     arena: ArenaAllocator,
 
     // Precomputed coefficients
@@ -629,7 +630,7 @@ const State = struct {
 
     /// Initialize the working state.
     /// Adapted from Andrej Karpathy's `llama2.c`
-    fn init(alloc: Allocator, config: Config) !State {
+    pub fn init(alloc: Allocator, config: Config) !State {
         var arena = ArenaAllocator.init(alloc);
         var a = arena.allocator();
 
@@ -681,7 +682,7 @@ const State = struct {
     }
 
     /// Deinitialize the state of this Transformer.
-    fn deinit(self: @This()) void {
+    pub fn deinit(self: @This()) void {
         self.arena.deinit();
     }
 };
@@ -1659,7 +1660,7 @@ test "dotProduct" {
     try std.testing.expectEqual(1688, dotProduct(&x, &y));
 }
 
-const Params = struct {
+pub const Params = struct {
     const Self = @This();
 
     temperature: f32,
@@ -1677,7 +1678,7 @@ const Params = struct {
         }
     };
 
-    fn init(temperature: f32, top_p: f32, vocab_size: usize) Params {
+    pub fn init(temperature: f32, top_p: f32, vocab_size: usize) Params {
         const now = std.time.milliTimestamp();
         var rng = std.Random.Xoroshiro128.init(@bitCast(now));
         return .{
@@ -1688,7 +1689,7 @@ const Params = struct {
         };
     }
 
-    fn sample(self: *Self, probs: []f32, allocator: Allocator) !Tokenizer.Token {
+    pub fn sample(self: *Self, probs: []f32, allocator: Allocator) !Tokenizer.Token {
         var next: Tokenizer.Token = undefined;
         if (self.temperature == 0) {
             const idx = std.sort.argMax(f32, probs, {}, std.sort.asc(f32)).?;

@@ -49,7 +49,7 @@ pub fn main() !void {
 
     var alloc = gpa.allocator();
 
-    const model_path = if (res.args.model) |model| model else "llama2-7b.bin";
+    const model_path: []const u8 = res.args.model orelse "llama2-7b.bin";
     const config = try read_config(model_path);
     try stdout.print("loaded config\n", .{});
     try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}, shared_classifier: {}\n", .{
@@ -63,22 +63,19 @@ pub fn main() !void {
         config.shared_classifier,
     });
 
-    var prompt: []u8 = undefined;
-    if (res.args.prompt) |p| {
-        prompt = try alloc.dupe(u8, p);
-    } else {
+    if (res.args.prompt == null) {
         try stdout.print("Falling back to default prompt\n", .{});
-        prompt = try alloc.dupe(u8, "Wikipedia the free online encyclopedia that");
     }
-    defer alloc.free(prompt);
+    const prompt: []const u8 = res.args.prompt orelse "Wikipedia the free online encyclopedia that";
     try bw.flush();
 
-    const tokenizer_path = if (res.args.tokenizer) |t_path| t_path else "tokenizer.bin";
+    const tokenizer_path = res.args.tokenizer orelse "tokenizer.bin";
     var tokenizer = try load_tokenizer(tokenizer_path, alloc, config.vocab_size);
     defer tokenizer.deinit();
-    try stdout.print("loaded tokenizer; max length: {d}\n", .{tokenizer.max_len});
-    try bw.flush();
+    try stdout.print("Loaded tokenizer; max length: {d}\n", .{tokenizer.max_len});
 
+    try stdout.print("Loading model weights... ", .{});
+    try bw.flush();
     var transformer = try TransformerV1.init(model_path, config);
     defer transformer.deinit();
     try stdout.print("Done loading model...\n", .{});
@@ -892,7 +889,7 @@ const TransformerV1 = struct {
     classifier: Weights,
 
     /// Initialize the Transformer weight pointers with the provided file.
-    fn init(model_path: []const u8, config: Config) !TransformerV1 {
+    pub fn init(model_path: []const u8, config: Config) !TransformerV1 {
         //std.debug.print("Opening Transformer model\n", .{});
         const fd = try std.posix.open(model_path, .{}, 0o440);
         errdefer std.posix.close(fd);
@@ -1030,7 +1027,7 @@ const TransformerV1 = struct {
     }
 
     /// Unmap any memory and free any resources used by this `Transformer`.
-    fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self) void {
         std.debug.print("Transformer.deinit()\n", .{});
         std.posix.munmap(self.ptr.?);
         std.posix.close(self.fd);
@@ -1043,7 +1040,7 @@ const TransformerV1 = struct {
     ///
     /// Returns a slice of logits from calculation. Caller **does not** down the returned
     /// slice and should not attempt to free it.
-    fn forward(self: Self, state: *State, token: Tokenizer.Token, n_token: usize, progress: std.Progress.Node) []f32 {
+    pub fn forward(self: Self, state: *State, token: Tokenizer.Token, n_token: usize, progress: std.Progress.Node) []f32 {
         // Get a considerable speedup for operations that occur within here.
         @setFloatMode(.optimized);
 
@@ -1052,7 +1049,7 @@ const TransformerV1 = struct {
         const dim = c.dim;
         const dim2 = dim * dim;
         const kv_dim = (c.dim * c.n_kv_heads) / c.n_heads;
-        const kv_mul = c.n_heads / c.n_kv_heads;
+        //const kv_mul = c.n_heads / c.n_kv_heads;
         const head_size = c.dim / c.n_heads;
 
         const token_offset: usize = @as(usize, @intCast(token)) * dim;
@@ -1168,46 +1165,10 @@ const TransformerV1 = struct {
                 @memcpy(cache_val_vec, state.v);
             }
 
-            // Perform multi-head attention over all heads
-            for (0..c.n_heads) |head| {
-                // Attention is defined in "Attention is All You Need"
-                // The formula is:
-                //   Attention(Q,K,V) = softmax(QK^T/sqrt(d_k))V
-                // Where d_k is the dimension of the queries and keys, and the values
-                // are of dimensions d_v.
-                const query = state.q[head * head_size ..][0..head_size];
-                const attention = state.attention[head * c.max_seq_length ..][0 .. n_token + 1];
-
-                // Calculate QK^T / sqrt(d_k) for each token (including the next one)
-                for (0..n_token + 1) |tok| {
-                    const key = state.k_cache[layer_offset + tok * kv_dim + (head / kv_mul) * head_size ..][0..head_size];
-
-                    const qk = dotProduct(query, key);
-                    const inner = qk / std.math.sqrt(@as(f32, @floatFromInt(head_size)));
-                    attention[tok] = inner;
-                }
-
-                // Calculate softmax(QK^T/sqrt(d_k)
-                softMax(attention);
-
-                // We now have the softmax(QK^T/sqrt(d_k)).
-                // Need to multiply by value vector.
-                var attn_tmp: []f32 = state.work[head * head_size .. (head + 1) * head_size];
-                @memset(attn_tmp, 0);
-
-                // Multiply softmax(QK^T/sqrt(d_k)) by the values (V)
-                // This gives us the attention for each QKV pairing
-                for (0..n_token + 1) |tok| {
-                    const value = state.v_cache[layer_offset + tok * kv_dim + (head / kv_mul) * head_size ..][0..head_size];
-                    const tok_attention = attention[tok];
-
-                    for (0..head_size) |j| {
-                        attn_tmp[j] += tok_attention * value[j];
-                    }
-                }
-                // now has the attention almost ready
-                // We calculate the output by multiplying it by `wo`
-            }
+            // Inputs are state.q, state.k, state.v
+            // Output is in state.work
+            // Everything else can be mangled
+            self.attention(state, i, n_token);
 
             // Almost done w/ Attention.forward(x), we just need to calculate the return
             // statement:
@@ -1282,6 +1243,60 @@ const TransformerV1 = struct {
         progress.completeOne();
 
         return state.output;
+    }
+
+    /// Perform attention the current forward layer iteration of the Transformer.
+    /// This calculates Attention(state.q, state.k, state.v) and writes the output
+    /// into `state.work`.
+    fn attention(self: Self, state: *State, layer: usize, n_token: usize) void {
+        const c = self.config;
+
+        const head_size = c.dim / c.n_heads;
+        const kv_dim = (c.dim * c.n_kv_heads) / c.n_heads;
+        const kv_mul = c.n_heads / c.n_kv_heads;
+        const layer_offset = layer * c.max_seq_length * kv_dim;
+
+        // Perform multi-head attention over all heads
+        for (0..c.n_heads) |head| {
+            // Attention is defined in "Attention is All You Need"
+            // The formula is:
+            //   Attention(Q,K,V) = softmax(QK^T/sqrt(d_k))V
+            // Where d_k is the dimension of the queries and keys, and the values
+            // are of dimensions d_v.
+            const query = state.q[head * head_size ..][0..head_size];
+            const att = state.attention[head * c.max_seq_length ..][0 .. n_token + 1];
+
+            // Calculate QK^T / sqrt(d_k) for each token (including the next one)
+            const base = layer_offset + (head / kv_mul) * head_size;
+            for (0..n_token + 1) |tok| {
+                const key = state.k_cache[base + tok * kv_dim ..][0..head_size];
+
+                const qk = dotProduct(query, key);
+                const inner = qk / std.math.sqrt(@as(f32, @floatFromInt(head_size)));
+                att[tok] = inner;
+            }
+
+            // Calculate softmax(QK^T/sqrt(d_k)
+            softMax(att);
+
+            // We now have the softmax(QK^T/sqrt(d_k)).
+            // Need to multiply by value vector.
+            var attn_tmp: []f32 = state.work[head * head_size .. (head + 1) * head_size];
+            @memset(attn_tmp, 0);
+
+            // Multiply softmax(QK^T/sqrt(d_k)) by the values (V)
+            // This gives us the attention for each QKV pairing
+            for (0..n_token + 1) |tok| {
+                const value = state.v_cache[base + tok * kv_dim ..][0..head_size];
+                const tok_attention = att[tok];
+
+                for (0..head_size) |j| {
+                    attn_tmp[j] += tok_attention * value[j];
+                }
+            }
+            // now has the attention almost ready
+            // We calculate the output by multiplying it by `wo`
+        }
     }
 };
 

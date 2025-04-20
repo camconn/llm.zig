@@ -803,10 +803,8 @@ fn apply_rope_embeddings(
     head_size: usize,
     n: usize,
 ) void {
-    const half_head = head_size / 2;
-
-    // Base index of RoPe embeddings
-    const base = n * half_head;
+    // Base index of RoPE embedding coefficients
+    const base = n * head_size / 2;
 
     for (0..n_heads) |hi| {
         var hd: usize = 0;

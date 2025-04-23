@@ -9,10 +9,13 @@
 
 const std = @import("std");
 
+const ggml = @import("ggml.zig");
 const math = @import("math.zig");
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+
+pub const Error = error{ BadFile, BadFormat, Other };
 
 pub const Config = struct {
     dim: usize,
@@ -1260,3 +1263,60 @@ pub const Params = struct {
         return tokens[last_idx].t;
     }
 };
+
+pub const LlamaContext = struct {
+    transformer: TransformerV1,
+    state: State,
+    tokenizer: Tokenizer,
+};
+
+/// Load a Llama context from the provided file
+fn load_from_ggml(file: ggml.GGUFFile, alloc: std.mem.Allocator) !LlamaContext {
+    errdefer file.deinit();
+
+    // Verify names
+    if (file.getValue(ggml.name_key)) |name| {
+        if (!std.mem.eql(u8, name.*.string.str, "llama2-7b")) {
+            return Error.BadFile;
+        }
+    } else {
+        @panic("Could not find GGML model name");
+    }
+
+    if (file.getValue(ggml.arch_key)) |arch| {
+        if (!std.mem.eql(u8, arch.*.string.str, "llama")) {
+            return Error.BadFormat;
+        }
+    } else {
+        @panic("Could not find architecture key");
+    }
+
+    if (file.getValue("tokenizer.ggml.model")) |tok_model| {
+        if (!std.mem.eql(u8, tok_model.*.string.str, "llama")) {
+            return Error.BadFormat;
+        }
+    } else {
+        @panic("Could not find tokenizer model key");
+    }
+    const vocab_size = file.getValue("llama.vocab_size").?.uint32;
+
+    const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
+    const token_scores = file.getValue("tokenizer.ggml.scores").?.array;
+    //const token_types = file.getValue("tokenizer.ggml.type").?.array;
+
+    const tokens = alloc.alloc(Tokenizer.TokenEntry, vocab_size);
+
+    for (0..vocab_size) |i| {
+        const chars = token_chars.array[i].string.str;
+        const score = token_scores.array[i].float32;
+        //const _token_type = token_ids.array[i].int32;
+
+        const token = Tokenizer.TokenEntry{
+            .score = score,
+            .chars = chars,
+            .id = @intCast(i),
+        };
+        tokens[i] = token;
+    }
+    @panic("TODO");
+}

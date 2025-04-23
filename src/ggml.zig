@@ -222,7 +222,7 @@ pub const GGUFHeader = struct {
 // gguf_tensor_info_t
 pub const TensorInfo = struct {
     name: String,
-    n_dimensions: u32,
+    dim: u32,
     dimensions: []u64,
     ggml_type: Type,
     /// The absolute offset of the tensor within the file, in bytes.
@@ -243,7 +243,7 @@ pub const TensorInfo = struct {
 
         return .{
             .name = name,
-            .n_dimensions = dim,
+            .dim = dim,
             .dimensions = dimensions,
             .ggml_type = ggml_type,
             .offset = offset,
@@ -251,10 +251,10 @@ pub const TensorInfo = struct {
     }
 };
 
-const alignment_key = "general.alignment";
-const quant_version_key = "general.quantization_version";
-const arch_key = "general.architecture";
-const name_key = "general.name";
+pub const alignment_key = "general.alignment";
+pub const quant_version_key = "general.quantization_version";
+pub const arch_key = "general.architecture";
+pub const name_key = "general.name";
 
 // gguf_file_t
 pub const GGUFFile = struct {
@@ -420,7 +420,6 @@ pub const GGUFFile = struct {
 
         for (0..metadata_count) |_| {
             const kv = try MetadataKV.read(reader, alloc);
-            std.debug.print("kv: {s}={}\n", .{ kv.key.str, kv.value_type });
             try ret.append(kv);
         }
         return ret.toOwnedSlice();
@@ -452,6 +451,20 @@ pub const GGUFFile = struct {
         return getMetadataValue(key, self.metadata);
     }
 
+    pub fn dumpMetadata(self: *const Self) void {
+        for (self.metadata) |kv| {
+            switch (kv.value_type) {
+                .string => std.debug.print("{s}={s}\n", .{ kv.key.str, kv.value.string.str }),
+                .uint32 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.uint32 }),
+                .uint64 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.uint64 }),
+                .float32 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.float32 }),
+                .float64 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.float64 }),
+                .array => std.debug.print("{s}=array {d} elem, {}\n", .{ kv.key.str, kv.value.array.len, kv.value.array.elem_type }),
+                else => std.debug.print("{s}={}\n", .{ kv.key.str, kv.value_type }),
+            }
+        }
+    }
+
     pub fn deinit(self: *Self) void {
         _ = self.arena.reset(.free_all);
         self.arena.deinit();
@@ -470,4 +483,19 @@ pub fn main() !void {
     var file = try GGUFFile.read_file(path, alloc);
     defer file.deinit();
     std.debug.print("Read file {s}\n", .{path});
+
+    std.debug.print("Printing metadata\n", .{});
+    for (file.metadata) |kv| {
+        std.debug.print("{s}: {}\n", .{ kv.key.str, kv.value_type });
+    }
+
+    //std.debug.print("\nPrinting tensor info\n", .{});
+    //for (file.tensor_info) |tensor| {
+    //    std.debug.print("Got tensor {s} with dim {d} shape {any}\n", .{ tensor.name.str, tensor.dim, tensor.dimensions });
+    //}
+
+    std.debug.print("\n", .{});
+    file.dumpMetadata();
+
+    std.debug.print("\nClosing file\n", .{});
 }

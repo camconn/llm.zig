@@ -8,7 +8,6 @@ const std = @import("std");
 
 const clap = @import("clap");
 
-const ggml = @import("ggml.zig");
 const llama = @import("llama.zig");
 
 const print_perf = false;

@@ -64,22 +64,24 @@ pub const Type = enum(u32) {
 
 // gguf_metadata_value_type
 pub const MetadataType = enum(u32) {
-    uint8 = 0,
-    int8 = 1,
-    uint16 = 2,
-    int16 = 3,
-    uint32 = 4,
-    int32 = 5,
+    // zig fmt: off
+    uint8   = 0,
+    int8    = 1,
+    uint16  = 2,
+    int16   = 3,
+    uint32  = 4,
+    int32   = 5,
     float32 = 6,
     /// 0 and 1 are valid. All other values mean the model or reader is buggy
     boolean = 7,
     /// UTF-8 non-null terminated
-    string = 8,
+    string  = 8,
     /// Arrays can be nested. The "Length" of the array is the # of elems, not the size in bytes
-    array = 9,
-    uint64 = 10,
-    int64 = 11,
+    array   = 9,
+    uint64  = 10,
+    int64   = 11,
     float64 = 12,
+    // zig fmt: on
 };
 
 // gguf_string_t
@@ -249,6 +251,11 @@ pub const TensorInfo = struct {
     }
 };
 
+const alignment_key = "general.alignment";
+const quant_version_key = "general.quantization_version";
+const arch_key = "general.architecture";
+const name_key = "general.name";
+
 // gguf_file_t
 pub const GGUFFile = struct {
     // ========================================
@@ -258,8 +265,10 @@ pub const GGUFFile = struct {
     metadata: []MetadataKV,
     // field is offset by GGUFHeader.tensor_count
     tensor_info: []TensorInfo,
+
     // padding
     // padding ends at sizeof(GGUFHeader) + sizeof(tensor_infos)
+    tensor_data_offset: usize,
     //tensor_data: anyopaque,
 
     // ========================================
@@ -302,20 +311,6 @@ pub const GGUFFile = struct {
         const ptr = try std.posix.mmap(null, fsize, std.posix.PROT.READ, mmap_type, fd, 0);
         errdefer std.posix.munmap(ptr);
 
-        var stream = std.io.fixedBufferStream(ptr);
-        const reader = stream.reader();
-
-        var arena = Arena.init(alloc);
-        errdefer arena.deinit();
-        const allocator = arena.allocator();
-
-        // Read header
-        const header = try GGUFHeader.read(reader);
-        // read metadata
-        const metadata = try read_metadata(header.metadata_kv_count, reader, allocator);
-        // Read tensor info
-        const tensor_info = try read_tensor_info(header.tensor_count, reader, allocator);
-
         // Tell the kernel we expect to do sequential reads and that we will need the
         // mapped file in the near future.
         //
@@ -324,11 +319,87 @@ pub const GGUFFile = struct {
         const madvise_flags = std.posix.MADV.SEQUENTIAL | std.posix.MADV.WILLNEED;
         try std.posix.madvise(ptr.ptr, fsize, madvise_flags);
 
+        // Get ready to parse the header and file metadata
+
+        var stream = std.io.fixedBufferStream(ptr);
+        const reader = stream.reader();
+
+        var arena = Arena.init(alloc);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+
+        // Actually parse the file.
+
+        // Read header
+        const header = try GGUFHeader.read(reader);
+        // read metadata
+        const metadata = try read_metadata(header.metadata_kv_count, reader, allocator);
+        // Read tensor info
+        const tensor_info = try read_tensor_info(header.tensor_count, reader, allocator);
+
+        // Alignment must be a u32
+        const alignment = if (getMetadataValue(alignment_key, metadata)) |val|
+            switch (val.*) {
+                .uint32 => val.*.uint32,
+                else => {
+                    std.debug.print("\"{s}\" must be a uint32\n", .{alignment_key});
+                    return Error.Format;
+                },
+            }
+        else
+            32;
+        // Quantization version must be a u32
+        const quantization = if (getMetadataValue(quant_version_key, metadata)) |val|
+            switch (val.*) {
+                .uint32 => val.*.uint32,
+                else => {
+                    std.debug.print("\"{s}\" must be a uint32\n", .{quant_version_key});
+                    return Error.Format;
+                },
+            }
+        else
+            0;
+
+        const arch = if (getMetadataValue(arch_key, metadata)) |arch|
+            switch (arch.*) {
+                .string => arch.*.string.str,
+                else => {
+                    std.debug.print("\"{s}\" must be a string\n", .{arch_key});
+                    return Error.Format;
+                },
+            }
+        else {
+            std.debug.print("\"{s}\" must be set\n", .{arch_key});
+            return Error.Format;
+        };
+
+        const name = if (getMetadataValue(name_key, metadata)) |name|
+            switch (name.*) {
+                .string => name.*.string.str,
+                else => {
+                    std.debug.print("\"{s}\" must be a string\n", .{name_key});
+                    return Error.Format;
+                },
+            }
+        else
+            "unset";
+
+        std.debug.print("Model architecture: {s}\n", .{arch});
+        std.debug.print("Model name: {s}\n", .{name});
+        std.debug.print("desired alignment: {d}; quantization: {d}\n", .{ alignment, quantization });
+
+        const offset: usize = @intCast(try reader.context.getPos());
+        std.debug.print("Current file offset is {d}\n", .{offset});
+
+        const tensor_data_offset = std.mem.alignForward(usize, offset, @intCast(alignment));
+        std.debug.print("Tensor_data starts at {d}\n", .{tensor_data_offset});
+
         return .{
             // gguf fields
             .header = header,
             .metadata = metadata,
             .tensor_info = tensor_info,
+            .tensor_data_offset = tensor_data_offset,
 
             // housekeeping fields
             .fd = fd,
@@ -365,6 +436,20 @@ pub const GGUFFile = struct {
             try ret.append(tensor);
         }
         return ret.toOwnedSlice();
+    }
+
+    fn getMetadataValue(key: []const u8, metadata: []MetadataKV) ?*const Value {
+        for (metadata) |kv| {
+            if (std.mem.eql(u8, key, kv.key.str)) {
+                return &kv.value;
+            }
+        }
+        return null;
+    }
+
+    /// Get the value of a particular Metadata key if it is present.
+    pub fn getValue(self: *const Self, key: []const u8) ?*const Value {
+        return getMetadataValue(key, self.metadata);
     }
 
     pub fn deinit(self: *Self) void {

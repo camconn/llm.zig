@@ -797,6 +797,7 @@ fn apply_rope_embeddings(
 }
 
 /// Represents the flattened weights of a neural network.
+/// The best guess we have is that the alignment is *4* based on the size of an f32.
 const Weights = []align(4) f32;
 
 /// Represents a single `TransformerBlock` of the Llama V1/V2 transformer.
@@ -841,6 +842,8 @@ pub const TransformerBlock = struct {
         };
     }
 
+    /// Get the contents of a tensor named `blk.<n>.<name>.weight` from the loaded GGUF `file`.
+    /// Assumes that the backing tensor exists within the GGUF file.
     fn getTensor(T: type, name: []const u8, file: ggml.GGUFFile, n: usize) []T {
         var buf = [_]u8{0} ** 64;
         const full_name = std.fmt.bufPrint(&buf, "blk.{d}.{s}.weight", .{ n, name });
@@ -852,35 +855,37 @@ pub const TransformerBlock = struct {
     }
 };
 
-/// Struct which contains the weights for the transformer.
-/// This is loaded from a V1 export from `llama2.c`.
+/// The weights of a Llama model - specifically the transformer bits.
 ///
-/// This struct is for calculation purposes immutable and represents
-/// the contents of the loaded model, backed by `mmap(2)`.
+/// This struct is immutable and represents the contents of a loaded model from a file on storage.
+/// The file is read into memory with `mmap(2)`.
 pub const TransformerV1 = struct {
     const Self = @This();
     const page_size_min = std.heap.page_size_min;
     const header_len = 256;
 
-    // Best we can guess is the alignment is `4` based on the file export.
+    // Internally managed resources
+    fd: std.posix.fd_t,
+    ptr: ?[]align(page_size_min) u8,
+    arena: ArenaAllocator,
 
     // Config weights
     config: Config,
 
-    fd: std.posix.fd_t,
-    ptr: ?[]align(page_size_min) u8,
-
     // Embeddings
     token_embed: Weights,
     // Transformer layers
-    layers: [32]TransformerBlock,
+    layers: []TransformerBlock,
     // Output norms
     norm: Weights,
     // Only set whenever no shared classifier layer with tokenizer
     classifier: Weights,
 
-    /// Initialize the Transformer weight pointers with the provided file.
-    pub fn init(model_path: []const u8, config: Config) !TransformerV1 {
+    /// Initialize a transformer from a `.bin` file exported by the *V1 Export* of `llama2.c`'s
+    /// [export.py script](https://github.com/karpathy/llama2.c/blob/master/export.py).
+    ///
+    /// Refer to this project's `README.md` for details on how to generate one.
+    pub fn initV1(model_path: []const u8, config: Config, alloc: Allocator) !TransformerV1 {
         //std.debug.print("Opening Transformer model\n", .{});
         const fd = try std.posix.open(model_path, .{}, 0o440);
         errdefer std.posix.close(fd);
@@ -989,20 +994,21 @@ pub const TransformerV1 = struct {
             i += out_classifier.?.len;
         }
 
+        // make sure we read the whole file.
         const used_size = i * @sizeOf(f32) + header_len;
+        std.debug.assert(fsize == used_size);
 
-        std.debug.assert(fsize == used_size); // make sure we read the whole file.
-
-        // Convert to Layers
-        // TODO: Pass in Allocator to define layers. For now we just statically define them
-        //var layers = try alloc.alloc(TransformerBlock, config.n_layers);
-        std.debug.assert(config.n_layers == 32);
-
+        // Convert weight slices to `TransformerBlock`s.
         const dim2 = dim * dim;
         const kv_dim = (config.dim * config.n_kv_heads) / config.n_heads;
         const kv_len = dim * kv_dim;
 
-        var layers: [32]TransformerBlock = undefined;
+        var arena = ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+        var allocator = arena.allocator();
+
+        var layers = try allocator.alloc(TransformerBlock, config.n_layers);
+        errdefer allocator.free(layers);
         for (0..config.n_layers) |n| {
             const l_attn_norm = rms_attention[n * dim .. (n + 1) * dim];
 
@@ -1038,6 +1044,7 @@ pub const TransformerV1 = struct {
             .config = config,
             .fd = fd,
             .ptr = ptr,
+            .arena = arena,
 
             .token_embed = token_embed,
             .layers = layers,
@@ -1051,6 +1058,7 @@ pub const TransformerV1 = struct {
         std.debug.print("Transformer.deinit()\n", .{});
         std.posix.munmap(self.ptr.?);
         std.posix.close(self.fd);
+        self.arena.deinit();
         self.ptr = null;
         self.fd = -1;
     }

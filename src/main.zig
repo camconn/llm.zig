@@ -80,7 +80,7 @@ pub fn main() !void {
 
     try stdout.print("Loading model weights... ", .{});
     try bw.flush();
-    var transformer = try TransformerV1.init(model_path, config);
+    var transformer = try TransformerV1.initV1(model_path, config, alloc);
     defer transformer.deinit();
     try stdout.print("Done loading model...\n", .{});
     try bw.flush();

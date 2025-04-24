@@ -24,8 +24,9 @@ pub fn main() !void {
 
     const params = comptime clap.parseParamsComptime(
         \\-h, --help             Display this help and exit.
+        \\-f, --format <str>     Format of model to load ("ggml", "llama2.c")
         \\-m, --model <str>      Path to the model to use
-        \\-t, --tokenizer <str>  Path to the tokenizer to use
+        \\-t, --tokenizer <str>  Path to the tokenizer to use (llama2.c only)
         \\-p, --prompt <str>     Prompt to use
         \\
     );
@@ -44,46 +45,38 @@ pub fn main() !void {
         return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
     }
 
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
+    const stdout_file = std.io.getStdOut();
+    const stdout = stdout_file.writer();
 
-    const stdout = bw.writer();
+    const model_format: []const u8 = res.args.format orelse "ggml";
+    if (!(std.mem.eql(u8, model_format, "ggml") or std.mem.eql(u8, model_format, "llama2.c"))) {
+        return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+    }
+
     try stdout.print("Loading model config\n", .{});
-    try bw.flush();
 
     var alloc = gpa.allocator();
 
     const model_path: []const u8 = res.args.model orelse "llama2-7b.bin";
-    const config = try Config.read(model_path);
-    try stdout.print("loaded config\n", .{});
-    try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}, shared_classifier: {}\n", .{
-        config.dim,
-        config.hidden_dim,
-        config.n_layers,
-        config.n_heads,
-        config.n_kv_heads,
-        config.vocab_size,
-        config.max_seq_length,
-        config.shared_classifier,
-    });
+    const tokenizer_path = res.args.tokenizer orelse "tokenizer.bin";
+
+    const context = if (std.mem.eql(u8, model_format, "ggml"))
+        try llama.load_from_ggml(model_path, alloc)
+    else
+        try load_llama2(tokenizer_path, model_path, alloc);
+
+    var state = context.state;
+    defer state.deinit();
+    var transformer = context.transformer;
+    defer transformer.deinit();
+    var tokenizer = context.tokenizer;
+    defer tokenizer.deinit();
+    const config = context.config;
 
     if (res.args.prompt == null) {
         try stdout.print("Falling back to default prompt\n", .{});
     }
     const prompt: []const u8 = res.args.prompt orelse "Wikipedia the free online encyclopedia that";
-    try bw.flush();
-
-    const tokenizer_path = res.args.tokenizer orelse "tokenizer.bin";
-    var tokenizer = try Tokenizer.init(tokenizer_path, alloc, config.vocab_size);
-    defer tokenizer.deinit();
-    try stdout.print("Loaded tokenizer; max length: {d}\n", .{tokenizer.max_len});
-
-    try stdout.print("Loading model weights... ", .{});
-    try bw.flush();
-    var transformer = try TransformerV1.initV1(model_path, config, alloc);
-    defer transformer.deinit();
-    try stdout.print("Done loading model...\n", .{});
-    try bw.flush();
 
     const tokens = try tokenizer.encode(prompt, alloc);
     defer alloc.free(tokens);
@@ -95,10 +88,6 @@ pub fn main() !void {
         const chars = chars_list[idx];
         try stdout.print("Token #{d} = {d: >8}; <<{s}>>\n", .{ i, tok, chars });
     }
-    try bw.flush();
-
-    var state = try State.init(alloc, config);
-    defer state.deinit();
 
     var picker = Params.init(0.95, 0.9, config.vocab_size);
 
@@ -137,10 +126,49 @@ pub fn main() !void {
         const chars = tokenizer.tokens.items(.chars)[idx];
 
         try stdout.print("In: {d} <<{s}>>; Out: {d} <<{s}>>\n", .{ token, chars_in, decoded, chars });
-        try bw.flush();
         token = decoded;
+        if (n == 20) {
+            break;
+        }
     }
 
     try stdout.print("Done\nCleaning up\n", .{});
-    try bw.flush();
+}
+
+fn load_llama2(tokenizer_path: []const u8, model_path: []const u8, alloc: std.mem.Allocator) !llama.LlamaContext {
+    const config = try Config.read(model_path);
+
+    const stdout_file = std.io.getStdOut();
+    const stdout = stdout_file.writer();
+
+    try stdout.print("loaded config\n", .{});
+    try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}, shared_classifier: {}\n", .{
+        config.dim,
+        config.hidden_dim,
+        config.n_layers,
+        config.n_heads,
+        config.n_kv_heads,
+        config.vocab_size,
+        config.max_seq_length,
+        config.shared_classifier,
+    });
+
+    var tokenizer = try Tokenizer.init(tokenizer_path, alloc, config.vocab_size);
+    errdefer tokenizer.deinit();
+    try stdout.print("Loaded tokenizer; max length: {d}\n", .{tokenizer.max_len});
+
+    try stdout.print("Loading model weights... ", .{});
+    var transformer = try TransformerV1.initV1(model_path, config, alloc);
+    errdefer transformer.deinit();
+    try stdout.print("Done loading model...\n", .{});
+
+    var state = try State.init(alloc, config);
+    errdefer state.deinit();
+
+    return .{
+        .config = config,
+        .transformer = transformer,
+        .tokenizer = tokenizer,
+        .state = state,
+    };
 }

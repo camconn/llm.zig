@@ -276,19 +276,19 @@ pub const TensorInfo = struct {
 
     /// Get a raw slice of the Tensor's data in native model order.
     /// Get the elements of this tensor from the files `mmap(2)` pointer.
-    pub fn getElems(self: *Self, data_start: usize, T: type) []const T {
+    pub fn getElems(self: Self, data_start: usize, T: type) []const T {
         // TODO: Figure out a better way of enforcing type safety.
-        std.debug.assert(T == self.getElemType());
+        //std.debug.assert(T == self.getElemType());
 
         const target = data_start + self.offset;
 
         var len: usize = @intCast(self.dimensions[0]);
-        for (1..self.dimensions) |dim| {
+        for (1..self.dim) |dim| {
             len *= @intCast(dim);
         }
         std.debug.assert(len != 0);
 
-        const ptr: [*]T = @ptrCast(target);
+        const ptr: [*]T = @ptrFromInt(target);
         return ptr[0..len];
     }
 };
@@ -518,7 +518,7 @@ pub const GGUFFile = struct {
     }
 
     /// Retrieve the `TensorInfo` with `name` if it exists, or `null` if not.
-    pub fn getTensorInfo(self: *Self, name: []const u8) ?TensorInfo {
+    pub fn getTensorInfo(self: Self, name: []const u8) ?TensorInfo {
         for (self.tensor_info) |tensor| {
             if (std.mem.eql(u8, tensor.name.str, name)) {
                 return tensor;

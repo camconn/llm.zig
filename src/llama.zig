@@ -15,7 +15,11 @@ const math = @import("math.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-pub const Error = error{ BadFile, BadFormat, Other };
+pub const Error = error{
+    BadFile,
+    BadFormat,
+    Other,
+};
 
 pub const Config = struct {
     dim: usize,
@@ -207,8 +211,8 @@ pub const Tokenizer = struct {
         }
 
         // Sort the token so that the `chars` elements are in order
+        dumpTokens(tokens);
         tokens.sortUnstable(Sorter{ .toks = &tokens });
-        //dumpTokens(tokens);
 
         // `tokens` is now sorted by the source bytes/characters of each token entry in
         // semi-alphabetical order.
@@ -238,11 +242,12 @@ pub const Tokenizer = struct {
         const vocab_size = file.getValue("llama.vocab_size").?.uint32;
         const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
         const token_scores = file.getValue("tokenizer.ggml.scores").?.array;
-        //const token_types = file.getValue("tokenizer.ggml.type").?.array;
+        const token_ids = file.getValue("tokenizer.ggml.tokens").?.array;
+        std.debug.print("token ids: {}\n", .{token_ids.elem_type});
 
         var arena = ArenaAllocator.init(allocator);
         errdefer arena.deinit();
-        var alloc = allocator.allocator();
+        var alloc = arena.allocator();
 
         var tokens = Storage{};
         try tokens.ensureTotalCapacity(alloc, vocab_size + 10); // add 10 size for safety.
@@ -262,12 +267,12 @@ pub const Tokenizer = struct {
                 .chars = chars,
                 .id = @intCast(i),
             };
-            try tokens.append(token);
+            try tokens.append(alloc, token);
         }
 
         // Sort the token so that the `chars` elements are in order
+        dumpTokens(tokens);
         tokens.sortUnstable(Sorter{ .toks = &tokens });
-        //dumpTokens(tokens);
 
         // `tokens` is now sorted by the source bytes/characters of each token entry in
         // semi-alphabetical order.
@@ -345,7 +350,7 @@ pub const Tokenizer = struct {
         // Llama 2's tokenizer happens to use this setting, so go ahead and add a single space
         // in front of all tokens we search for.
         // This will be merged in the merge step so that [" ", "hello"] becomes [" hello"]
-        const space = lookupIndex(chars, SPACE_PIECE).?;
+        const space = lookupIndex(chars, SPACE_PIECE).?; // TODO: This fails when loading GGUF
         // space's token ID is 35, but don't hard-code that for now
         const space_id = ids[space];
 
@@ -798,7 +803,7 @@ fn apply_rope_embeddings(
 
 /// Represents the flattened weights of a neural network.
 /// The best guess we have is that the alignment is *4* based on the size of an f32.
-const Weights = []align(4) f32;
+const Weights = []align(4) const f32;
 
 /// Represents a single `TransformerBlock` of the Llama V1/V2 transformer.
 /// This method contains all the weights for a single "layer" of a model's layers.
@@ -844,11 +849,12 @@ pub const TransformerBlock = struct {
 
     /// Get the contents of a tensor named `blk.<n>.<name>.weight` from the loaded GGUF `file`.
     /// Assumes that the backing tensor exists within the GGUF file.
-    fn getTensor(T: type, name: []const u8, file: ggml.GGUFFile, n: usize) []T {
+    fn getTensor(T: type, name: []const u8, file: ggml.GGUFFile, n: usize) []const T {
+        std.debug.assert(n < 32);
         var buf = [_]u8{0} ** 64;
-        const full_name = std.fmt.bufPrint(&buf, "blk.{d}.{s}.weight", .{ n, name });
-        if (file.getTensorInfo(full_name).?.getElems(file.tensor_data_offset, T)) |ret| {
-            return ret;
+        const full_name = std.fmt.bufPrint(&buf, "blk.{d}.{s}.weight", .{ n, name }) catch unreachable;
+        if (file.getTensorInfo(full_name)) |tensor| {
+            return tensor.getElems(file.tensor_data_offset, T);
         }
         std.debug.print("Error: Tensor {s} does not exist in the GGUF file", .{full_name});
         @panic("Could not load tensor");
@@ -1056,8 +1062,9 @@ pub const TransformerV1 = struct {
     /// Unmap any memory and free any resources used by this `Transformer`.
     pub fn deinit(self: *Self) void {
         std.debug.print("Transformer.deinit()\n", .{});
-        std.posix.munmap(self.ptr.?);
-        std.posix.close(self.fd);
+        if (self.ptr) |inner| std.posix.munmap(inner);
+        if (self.fd >= 0) std.posix.close(self.fd);
+
         self.arena.deinit();
         self.ptr = null;
         self.fd = -1;
@@ -1407,13 +1414,15 @@ pub const Params = struct {
 };
 
 pub const LlamaContext = struct {
+    config: Config,
     transformer: TransformerV1,
     state: State,
     tokenizer: Tokenizer,
 };
 
 /// Load a Llama context from the provided file
-fn load_from_ggml(file: ggml.GGUFFile, alloc: std.mem.Allocator) !LlamaContext {
+pub fn load_from_ggml(file_name: []const u8, alloc: std.mem.Allocator) !LlamaContext {
+    var file = try ggml.GGUFFile.read_file(file_name, alloc);
     errdefer file.deinit();
 
     // Verify names
@@ -1441,17 +1450,54 @@ fn load_from_ggml(file: ggml.GGUFFile, alloc: std.mem.Allocator) !LlamaContext {
         @panic("Could not find tokenizer model key");
     }
 
-    const config = try Config.readGGUF(file);
+    const config = Config.readGGUF(file);
 
     // Loaded Tokenizer
-    var tokenizer = try Tokenizer.initGGUF(alloc);
+    var tokenizer = try Tokenizer.initGGUF(file, alloc);
     errdefer tokenizer.deinit();
 
-    var state = State.init(alloc, config);
+    var state = try State.init(alloc, config);
     errdefer state.deinit();
 
     // TODO: Load model weights
+    const token_embed = try loadWeights(f32, file, "token_embd.weight");
+    const output_norm = try loadWeights(f32, file, "output_norm.weight");
+    const output_weight = try loadWeights(f32, file, "output.weight");
 
-    // Load model weights
-    @panic("TODO");
+    var arena = ArenaAllocator.init(alloc);
+    errdefer arena.deinit();
+
+    var arena_alloc = arena.allocator();
+    var layers = try arena_alloc.alloc(TransformerBlock, config.n_layers);
+    for (0..config.n_layers) |i| {
+        layers[i] = TransformerBlock.initGGML(file, config, i);
+    }
+
+    const transformer = TransformerV1{
+        .fd = -1,
+        .ptr = null,
+        .arena = arena,
+
+        .config = config,
+
+        .token_embed = token_embed,
+        .layers = layers,
+        .norm = output_norm,
+        .classifier = output_weight,
+    };
+
+    return LlamaContext{
+        .config = config,
+        .transformer = transformer,
+        .state = state,
+        .tokenizer = tokenizer,
+    };
+}
+
+fn loadWeights(T: type, file: ggml.GGUFFile, name: []const u8) ![]const T {
+    if (file.getTensorInfo(name)) |tensor| {
+        return (&tensor).getElems(file.tensor_data_offset, T);
+    }
+    std.debug.print("Missing tensor weights in file: {s}\n", .{name});
+    return Error.BadFile;
 }

@@ -28,6 +28,20 @@ pub const Config = struct {
 
     shared_classifier: bool,
 
+    /// Read the configuration from a GGUF file.
+    pub fn readGGUF(file: ggml.GGUFFile) Config {
+        return .{
+            .dim = file.getValue("llama.embedding_length").?.uint32,
+            .hidden_dim = file.getValue("llama.feed_forward_length").?.uint32,
+            .n_layers = file.getValue("llama.block_count").?.uint32,
+            .n_heads = file.getValue("llama.attention.head_count").?.uint32,
+            .n_kv_heads = file.getValue("llama.attention.head_count_kv").?.uint32,
+            .vocab_size = file.getValue("llama.vocab_size").?.uint32,
+            .max_seq_length = file.getValue("llama.context_length").?.uint32,
+            .shared_classifier = file.getValue("output.weight") == null,
+        };
+    }
+
     /// Temporarily open the checkpoint file to read only the header.
     /// Do not leave the file open because we will mmap it.
     pub fn read(model_path: []const u8) !Config {
@@ -134,6 +148,18 @@ pub const Tokenizer = struct {
         return try Tokenizer.read(buffer.reader(), alloc, vocab_size);
     }
 
+    const Sorter = struct {
+        const S = @This();
+        toks: *Storage,
+        pub fn lessThan(self: S, left_index: usize, right_index: usize) bool {
+            const lhs = self.toks.items(.chars)[left_index];
+            const rhs = self.toks.items(.chars)[right_index];
+
+            // TODO: Use a real Unicode collator and ensure source tokens are normalized.
+            return std.mem.order(u8, lhs, rhs) == .lt;
+        }
+    };
+
     /// Read an exported Tokenizer model as exported by `llama2.c/tokenizer.py`
     /// Any scores and bytes read will be allocated with the supplied `Allocator` and only
     /// be freed after calling `deinit()`.
@@ -181,21 +207,9 @@ pub const Tokenizer = struct {
         }
 
         // Sort the token so that the `chars` elements are in order
-        const Sorter = struct {
-            const Sorter = @This();
-            toks: *Storage,
-            pub fn lessThan(self: Sorter, left_index: usize, right_index: usize) bool {
-                const lhs = self.toks.items(.chars)[left_index];
-                const rhs = self.toks.items(.chars)[right_index];
-
-                // TODO: Use a real Unicode collator and ensure source tokens are normalized.
-                return std.mem.order(u8, lhs, rhs) == .lt;
-            }
-        };
-
+        tokens.sortUnstable(Sorter{ .toks = &tokens });
         //dumpTokens(tokens);
 
-        tokens.sortUnstable(Sorter{ .toks = &tokens });
         // `tokens` is now sorted by the source bytes/characters of each token entry in
         // semi-alphabetical order.
 
@@ -212,6 +226,65 @@ pub const Tokenizer = struct {
         // Same with Token Storage
         return .{
             .max_len = max_len,
+            .tokens = tokens,
+            .arena = arena,
+            .token_to_idx = token_to_idx,
+        };
+    }
+
+    fn initGGUF(file: ggml.GGUFFile, allocator: Allocator) !Tokenizer {
+        const context_len = file.getValue("llama.context_length").?.uint32;
+
+        const vocab_size = file.getValue("llama.vocab_size").?.uint32;
+        const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
+        const token_scores = file.getValue("tokenizer.ggml.scores").?.array;
+        //const token_types = file.getValue("tokenizer.ggml.type").?.array;
+
+        var arena = ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        var alloc = allocator.allocator();
+
+        var tokens = Storage{};
+        try tokens.ensureTotalCapacity(alloc, vocab_size + 10); // add 10 size for safety.
+
+        // Nothing we can really do here if there's an error
+        for (0..vocab_size) |i| {
+            const chars = token_chars.array[i].string.str;
+            const score = token_scores.array[i].float32;
+            // Don't care about the type of token
+            //const token_type = token_ids.array[i].int32;
+
+            // NB: Entries of index [3,256+3) are encoded in some special fashion for their raw
+            // bytes. These values are encoded like `<0xZZ>` where `ZZ` is the token's character
+            // value in hexadecimal.
+            const token = Tokenizer.TokenEntry{
+                .score = score,
+                .chars = chars,
+                .id = @intCast(i),
+            };
+            try tokens.append(token);
+        }
+
+        // Sort the token so that the `chars` elements are in order
+        tokens.sortUnstable(Sorter{ .toks = &tokens });
+        //dumpTokens(tokens);
+
+        // `tokens` is now sorted by the source bytes/characters of each token entry in
+        // semi-alphabetical order.
+
+        // Build mapping of Token ID to index in `tokens`
+        var token_to_idx = try alloc.alloc(usize, vocab_size);
+        const ids = tokens.items(.id);
+        for (0..vocab_size) |i| {
+            const token = ids[i];
+            token_to_idx[@intCast(token)] = i;
+        }
+
+        // Copy the Area after all of the copies have been done, otherwise there will be
+        // a leak from the Arena's allocations.
+        // Same with Token Storage
+        return .{
+            .max_len = context_len,
             .tokens = tokens,
             .arena = arena,
             .token_to_idx = token_to_idx,
@@ -558,7 +631,7 @@ pub const State = struct {
     }
 
     /// Deinitialize the state of this Transformer.
-    pub fn deinit(self: @This()) void {
+    pub fn deinit(self: *@This()) void {
         self.arena.deinit();
     }
 };
@@ -1299,27 +1372,16 @@ fn load_from_ggml(file: ggml.GGUFFile, alloc: std.mem.Allocator) !LlamaContext {
         @panic("Could not find tokenizer model key");
     }
 
+    const config = try Config.readGGUF(file);
+
     // Loaded Tokenizer
-    const vocab_size = file.getValue("llama.vocab_size").?.uint32;
+    var tokenizer = try Tokenizer.initGGUF(alloc);
+    errdefer tokenizer.deinit();
 
-    const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
-    const token_scores = file.getValue("tokenizer.ggml.scores").?.array;
-    //const token_types = file.getValue("tokenizer.ggml.type").?.array;
+    var state = State.init(alloc, config);
+    errdefer state.deinit();
 
-    const tokens = alloc.alloc(Tokenizer.TokenEntry, vocab_size);
-
-    for (0..vocab_size) |i| {
-        const chars = token_chars.array[i].string.str;
-        const score = token_scores.array[i].float32;
-        //const _token_type = token_ids.array[i].int32;
-
-        const token = Tokenizer.TokenEntry{
-            .score = score,
-            .chars = chars,
-            .id = @intCast(i),
-        };
-        tokens[i] = token;
-    }
+    // TODO: Load model weights
 
     // Load model weights
     @panic("TODO");

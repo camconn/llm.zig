@@ -540,7 +540,10 @@ pub fn main() !void {
 
     std.debug.print("Printing metadata\n", .{});
     for (file.metadata) |kv| {
-        std.debug.print("{s}: {}\n", .{ kv.key.str, kv.value_type });
+        switch (kv.value_type) {
+            .uint32 => std.debug.print("{s}: u32 {d}\n", .{ kv.key.str, kv.value.uint32 }),
+            else => std.debug.print("{s}: {}\n", .{ kv.key.str, kv.value_type }),
+        }
     }
 
     std.debug.print("\nPrinting tensor info\n", .{});

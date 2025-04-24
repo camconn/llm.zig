@@ -221,11 +221,13 @@ pub const GGUFHeader = struct {
 
 // gguf_tensor_info_t
 pub const TensorInfo = struct {
+    const Self = @This();
+
     name: String,
     dim: u32,
     dimensions: []u64,
     ggml_type: Type,
-    /// The absolute offset of the tensor within the file, in bytes.
+    /// The relative offset of the tensor within the file, in bytes.
     /// This is a u64, but is represented as a usize to prevent a bunch of `@intCast` calls
     /// within model code.
     offset: usize,
@@ -233,6 +235,7 @@ pub const TensorInfo = struct {
     fn read(reader: Reader, alloc: std.mem.Allocator) Error!TensorInfo {
         const name = try (String.read(reader, alloc) catch Error.EOF);
         const dim = try (reader.readInt(u32, .little) catch Error.EOF);
+        std.debug.assert(dim > 0);
         const dimensions = try (alloc.alloc(u64, dim) catch Error.EOF);
         for (0..dim) |i| {
             const n = try (reader.readInt(u64, .little) catch Error.EOF);
@@ -248,6 +251,45 @@ pub const TensorInfo = struct {
             .ggml_type = ggml_type,
             .offset = offset,
         };
+    }
+
+    /// Get the element type of this
+    pub fn getElemType(self: Self) type {
+        return switch (self.ggml_type) {
+            .U8 => u8,
+            .I8 => i8,
+            .U16 => u16,
+            .I16 => i16,
+            .U32 => u32,
+            .I32 => i32,
+            .F32 => f32,
+            .U64 => u32,
+            .I64 => i32,
+            .F64 => f64,
+
+            else => {
+                std.debug.print("Unimplemented type: {}\n", .{self.ggml_type});
+                @panic("Unimplemented type");
+            },
+        };
+    }
+
+    /// Get a raw slice of the Tensor's data in native model order.
+    /// Get the elements of this tensor from the files `mmap(2)` pointer.
+    pub fn getElems(self: *Self, data_start: usize, T: type) []const T {
+        // TODO: Figure out a better way of enforcing type safety.
+        std.debug.assert(T == self.getElemType());
+
+        const target = data_start + self.offset;
+
+        var len: usize = @intCast(self.dimensions[0]);
+        for (1..self.dimensions) |dim| {
+            len *= @intCast(dim);
+        }
+        std.debug.assert(len != 0);
+
+        const ptr: [*]T = @ptrCast(target);
+        return ptr[0..len];
     }
 };
 
@@ -446,7 +488,7 @@ pub const GGUFFile = struct {
         return null;
     }
 
-    /// Get the value of a particular Metadata key if it is present.
+    /// Get the Metadata value for a key if it is present or `null` otherwise.
     pub fn getValue(self: *const Self, key: []const u8) ?*const Value {
         return getMetadataValue(key, self.metadata);
     }
@@ -465,12 +507,24 @@ pub const GGUFFile = struct {
         }
     }
 
+    /// De-initialize this GGUF file and free up underlying resources.
+    /// This invalidates any reference to memory of this GGUF file.
     pub fn deinit(self: *Self) void {
         _ = self.arena.reset(.free_all);
         self.arena.deinit();
 
         std.posix.munmap(self.mmap_ptr);
         std.posix.close(self.fd);
+    }
+
+    /// Retrieve the `TensorInfo` with `name` if it exists, or `null` if not.
+    pub fn getTensorInfo(self: *Self, name: []const u8) ?TensorInfo {
+        for (self.tensor_info) |tensor| {
+            if (std.mem.eql(u8, tensor.name.str, name)) {
+                return tensor;
+            }
+        }
+        return null;
     }
 };
 
@@ -489,13 +543,13 @@ pub fn main() !void {
         std.debug.print("{s}: {}\n", .{ kv.key.str, kv.value_type });
     }
 
-    //std.debug.print("\nPrinting tensor info\n", .{});
-    //for (file.tensor_info) |tensor| {
-    //    std.debug.print("Got tensor {s} with dim {d} shape {any}\n", .{ tensor.name.str, tensor.dim, tensor.dimensions });
-    //}
+    std.debug.print("\nPrinting tensor info\n", .{});
+    for (file.tensor_info) |tensor| {
+        std.debug.print("Got tensor {s} with dim {d} shape {any}\n", .{ tensor.name.str, tensor.dim, tensor.dimensions });
+    }
 
     std.debug.print("\n", .{});
-    file.dumpMetadata();
+    //file.dumpMetadata();
 
     std.debug.print("\nClosing file\n", .{});
 }

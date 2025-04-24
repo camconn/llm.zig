@@ -1298,6 +1298,8 @@ fn load_from_ggml(file: ggml.GGUFFile, alloc: std.mem.Allocator) !LlamaContext {
     } else {
         @panic("Could not find tokenizer model key");
     }
+
+    // Loaded Tokenizer
     const vocab_size = file.getValue("llama.vocab_size").?.uint32;
 
     const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
@@ -1318,5 +1320,7 @@ fn load_from_ggml(file: ggml.GGUFFile, alloc: std.mem.Allocator) !LlamaContext {
         };
         tokens[i] = token;
     }
+
+    // Load model weights
     @panic("TODO");
 }

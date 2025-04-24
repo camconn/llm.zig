@@ -131,6 +131,9 @@ pub const Tokenizer = struct {
     arena: ArenaAllocator,
     token_to_idx: []usize,
 
+    // Surrogate whitespace character used by Sentencepiece for spaces.
+    const whitespace_string = "▁"; // "\xe2\x96\x81";
+
     pub fn init(file_path: []const u8, alloc: Allocator, vocab_size: usize) !Tokenizer {
         // First try to load the model with relative and then fallback to absolute path if that fails.
         const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
@@ -259,19 +262,30 @@ pub const Tokenizer = struct {
             // Don't care about the type of token
             //const token_type = token_ids.array[i].int32;
 
+            // Replace the sentinel whitespace character with an actual space character because
+            // sentencepiece uses the bold underline like lunatics for whitespace.
+            var to_use: []u8 = chars;
+            if (std.mem.containsAtLeast(u8, to_use, 1, whitespace_string)) {
+                const cs = try alloc.alloc(u8, to_use.len);
+                const count = std.mem.replace(u8, chars, whitespace_string, " ", cs);
+                const new_len = cs.len - (count * 2);
+                to_use = cs[0..new_len];
+                //std.debug.print("Replaced underscore from <<{s}>> to <<{s}>>\n", .{ chars, to_use });
+            }
+
             // NB: Entries of index [3,256+3) are encoded in some special fashion for their raw
             // bytes. These values are encoded like `<0xZZ>` where `ZZ` is the token's character
             // value in hexadecimal.
             const token = Tokenizer.TokenEntry{
                 .score = score,
-                .chars = chars,
+                .chars = to_use,
                 .id = @intCast(i),
             };
             try tokens.append(alloc, token);
         }
 
         // Sort the token so that the `chars` elements are in order
-        dumpTokens(tokens);
+        //dumpTokens(tokens);
         tokens.sortUnstable(Sorter{ .toks = &tokens });
 
         // `tokens` is now sorted by the source bytes/characters of each token entry in

@@ -796,6 +796,62 @@ fn apply_rope_embeddings(
     }
 }
 
+/// Represents the flattened weights of a neural network.
+const Weights = []align(4) f32;
+
+/// Represents a single `TransformerBlock` of the Llama V1/V2 transformer.
+/// This method contains all the weights for a single "layer" of a model's layers.
+pub const TransformerBlock = struct {
+    attn_norm: Weights,
+    wq: Weights,
+    wk: Weights,
+    wv: Weights,
+    wo: Weights,
+
+    ffn_norm: Weights,
+    w1: Weights,
+    w2: Weights,
+    w3: Weights,
+
+    /// Initialize a transformer block with the provided backing `file` `mmap(2)` using config
+    /// if this is `n`-th layer.
+    fn initGGML(file: ggml.GGUFFile, _: Config, n: usize) TransformerBlock {
+        // TODO: Assert that weights have correct sizes w/ passed-in config
+        const attn_norm = getTensor(f32, "attn_norm", file, n);
+        const wq = getTensor(f32, "attn_q", file, n);
+        const wk = getTensor(f32, "attn_k", file, n);
+        const wv = getTensor(f32, "attn_v", file, n);
+        const wo = getTensor(f32, "attn_output", file, n);
+
+        const ffn_norm = getTensor(f32, "ffn_norm", file, n);
+        const w1 = getTensor(f32, "ffn_gate", file, n);
+        const w2 = getTensor(f32, "ffn_down", file, n);
+        const w3 = getTensor(f32, "ffn_up", file, n);
+
+        return .{
+            .attn_norm = attn_norm,
+            .wq = wq,
+            .wk = wk,
+            .wv = wv,
+            .wo = wo,
+            .ffn_norm = ffn_norm,
+            .w1 = w1,
+            .w2 = w2,
+            .w3 = w3,
+        };
+    }
+
+    fn getTensor(T: type, name: []const u8, file: ggml.GGUFFile, n: usize) []T {
+        var buf = [_]u8{0} ** 64;
+        const full_name = std.fmt.bufPrint(&buf, "blk.{d}.{s}.weight", .{ n, name });
+        if (file.getTensorInfo(full_name).?.getElems(file.tensor_data_offset, T)) |ret| {
+            return ret;
+        }
+        std.debug.print("Error: Tensor {s} does not exist in the GGUF file", .{full_name});
+        @panic("Could not load tensor");
+    }
+};
+
 /// Struct which contains the weights for the transformer.
 /// This is loaded from a V1 export from `llama2.c`.
 ///
@@ -807,7 +863,6 @@ pub const TransformerV1 = struct {
     const header_len = 256;
 
     // Best we can guess is the alignment is `4` based on the file export.
-    const Weights = []align(4) f32;
 
     // Config weights
     config: Config,
@@ -817,19 +872,8 @@ pub const TransformerV1 = struct {
 
     // Embeddings
     token_embed: Weights,
-    // Attention
-    rms_attention: Weights,
-    // Attention Layers
-    w_q: Weights,
-    w_k: Weights,
-    w_v: Weights,
-    w_o: Weights,
-    // Feed forward
-    feed_forward_norm: Weights,
-    // Unknown
-    w1: Weights,
-    w2: Weights,
-    w3: Weights,
+    // Transformer layers
+    layers: [32]TransformerBlock,
     // Output norms
     norm: Weights,
     // Only set whenever no shared classifier layer with tokenizer
@@ -885,7 +929,7 @@ pub const TransformerV1 = struct {
         const vocab = config.vocab_size;
         const dim = config.dim;
         const hidden_dim = config.hidden_dim;
-        const layers = config.n_layers;
+        const n_layers = config.n_layers;
         const n_heads = config.n_heads;
         const n_kv_heads = config.n_kv_heads;
         const head_size = dim / config.n_heads;
@@ -898,9 +942,9 @@ pub const TransformerV1 = struct {
         // attention:   [4096]f32
         // ffn_norm:    [4096]f32
         // norm:        [4096]f32
-        const rms_attention: Weights = weights[i .. i + layers * dim];
+        const rms_attention: Weights = weights[i .. i + n_layers * dim];
         i += rms_attention.len;
-        const ffn_norm: Weights = weights[i .. i + layers * dim];
+        const ffn_norm: Weights = weights[i .. i + n_layers * dim];
         i += ffn_norm.len;
         const norms: Weights = weights[i .. i + dim];
         i += norms.len;
@@ -916,13 +960,13 @@ pub const TransformerV1 = struct {
         // wv:          [4096][4096]f32
         // wo:          [4096][4096]f32
 
-        const wq: Weights = weights[i .. i + layers * dim * (n_heads * head_size)];
+        const wq: Weights = weights[i .. i + n_layers * dim * (n_heads * head_size)];
         i += wq.len;
-        const wk: Weights = weights[i .. i + layers * dim * (n_kv_heads * head_size)];
+        const wk: Weights = weights[i .. i + n_layers * dim * (n_kv_heads * head_size)];
         i += wq.len;
-        const wv: Weights = weights[i .. i + layers * dim * (n_kv_heads * head_size)];
+        const wv: Weights = weights[i .. i + n_layers * dim * (n_kv_heads * head_size)];
         i += wv.len;
-        const wo: Weights = weights[i .. i + layers * (n_heads * head_size) * dim];
+        const wo: Weights = weights[i .. i + n_layers * (n_heads * head_size) * dim];
         i += wo.len;
 
         // ff layers (7b)
@@ -930,11 +974,11 @@ pub const TransformerV1 = struct {
         // w2:          [4096][11008]f32
         // w3:          [11008][4096]f32
         // output:      [vocab_size][4096]f32
-        const w1: Weights = weights[i .. i + layers * dim * hidden_dim];
+        const w1: Weights = weights[i .. i + n_layers * dim * hidden_dim];
         i += w1.len;
-        const w2: Weights = weights[i .. i + layers * hidden_dim * dim];
+        const w2: Weights = weights[i .. i + n_layers * hidden_dim * dim];
         i += w2.len;
-        const w3: Weights = weights[i .. i + layers * dim * hidden_dim];
+        const w3: Weights = weights[i .. i + n_layers * dim * hidden_dim];
         i += w3.len;
 
         var out_classifier: ?Weights = null;
@@ -949,25 +993,55 @@ pub const TransformerV1 = struct {
 
         std.debug.assert(fsize == used_size); // make sure we read the whole file.
 
+        // Convert to Layers
+        // TODO: Pass in Allocator to define layers. For now we just statically define them
+        //var layers = try alloc.alloc(TransformerBlock, config.n_layers);
+        std.debug.assert(config.n_layers == 32);
+
+        const dim2 = dim * dim;
+        const kv_dim = (config.dim * config.n_kv_heads) / config.n_heads;
+        const kv_len = dim * kv_dim;
+
+        var layers: [32]TransformerBlock = undefined;
+        for (0..config.n_layers) |n| {
+            const l_attn_norm = rms_attention[n * dim .. (n + 1) * dim];
+
+            const n_dim2 = n * dim2;
+            const l_wq = wq[n_dim2 .. n_dim2 + dim2];
+            const l_wk = wk[n * kv_len .. (n + 1) * kv_len];
+            const l_wv = wv[n * kv_len .. (n + 1) * kv_len];
+            const l_wo = wo[n * dim2 .. (n + 1) * dim2];
+
+            const ffn_o = n * dim * config.hidden_dim;
+            const ffn_e = ffn_o + dim * config.hidden_dim;
+
+            const l_ffn_norm = ffn_norm[n * dim .. (n + 1) * dim];
+            const l_w1 = w1[ffn_o..ffn_e];
+            const l_w2 = w2[ffn_o..ffn_e];
+            const l_w3 = w3[ffn_o..ffn_e];
+
+            layers[n] = TransformerBlock{
+                .attn_norm = l_attn_norm,
+                .wq = l_wq,
+                .wk = l_wk,
+                .wv = l_wv,
+                .wo = l_wo,
+
+                .ffn_norm = l_ffn_norm,
+                .w1 = l_w1,
+                .w2 = l_w2,
+                .w3 = l_w3,
+            };
+        }
+
         return TransformerV1{
             .config = config,
             .fd = fd,
             .ptr = ptr,
 
-            .rms_attention = rms_attention,
             .token_embed = token_embed,
-            .feed_forward_norm = ffn_norm,
+            .layers = layers,
             .norm = norms,
-
-            .w_q = wq,
-            .w_k = wk,
-            .w_v = wv,
-            .w_o = wo,
-
-            .w1 = w1,
-            .w2 = w2,
-            .w3 = w3,
-
             .classifier = out_classifier.?,
         };
     }
@@ -993,7 +1067,6 @@ pub const TransformerV1 = struct {
         const c = self.config;
 
         const dim = c.dim;
-        const dim2 = dim * dim;
         const kv_dim = (c.dim * c.n_kv_heads) / c.n_heads;
         //const kv_mul = c.n_heads / c.n_kv_heads;
         const head_size = c.dim / c.n_heads;
@@ -1002,7 +1075,7 @@ pub const TransformerV1 = struct {
         const embeddings = self.token_embed[token_offset .. token_offset + dim];
         @memcpy(state.input[0..dim], embeddings);
 
-        const layer = progress.start("Layer", c.n_layers);
+        const layer_progress = progress.start("Layer", c.n_layers);
 
         for (0..c.n_layers) |i| {
             // Layer offset for caching
@@ -1074,25 +1147,19 @@ pub const TransformerV1 = struct {
             //
             //    return wo(output)
 
+            const layer = self.layers[i];
+
             // TransformerBlock.forward()
             // first handle the `attention_norm` call.
-            const rms_offset = i * dim;
-            math.rmsNorm(state.work, state.input, self.rms_attention[rms_offset .. rms_offset + dim]);
+            math.rmsNorm(state.work, state.input, layer.attn_norm);
 
             // Now handle attention matrix multiplies
             // xq = wq(x)
-            const i_dim2 = i * dim2;
-            const wq = self.w_q[i_dim2 .. i_dim2 + dim2];
-            math.matrixMul(state.q, wq, state.work, dim, dim);
-
+            math.matrixMul(state.q, layer.wq, state.work, dim, dim);
             // xk = wk(x)
-            const kv_len = dim * kv_dim;
-            const wk = self.w_k[i * kv_len .. (i + 1) * kv_len];
-            math.matrixMul(state.k, wk, state.work, kv_dim, dim);
-
+            math.matrixMul(state.k, layer.wk, state.work, kv_dim, dim);
             // xv = wv(x)
-            const wv = self.w_v[i * kv_len .. (i + 1) * kv_len][0..kv_len];
-            math.matrixMul(state.v, wv, state.work, kv_dim, dim);
+            math.matrixMul(state.v, layer.wv, state.work, kv_dim, dim);
 
             // RoPE
             //     xq, xk = apply_rotary_emb(xq, xk, freq_cs, freq_ss)
@@ -1120,9 +1187,8 @@ pub const TransformerV1 = struct {
             // statement:
             //     return wo(output)
             const attention_preout = state.work[0..];
-            const wo = self.w_o[i * dim2 .. (i + 1) * dim2];
 
-            math.matrixMul(state.work2[0..dim], wo, attention_preout, dim, dim);
+            math.matrixMul(state.work2[0..dim], layer.wo, attention_preout, dim, dim);
             // End of Attention.forward(x);
 
             // We are back in TransformerBlock.forward(x, freq_cs, freq_ss). We just need to add
@@ -1136,27 +1202,22 @@ pub const TransformerV1 = struct {
             // We are no longer using the input `x` and can now use it as `h`.
 
             // Calculate ff = self.ffn_norm(h) = RMSNorm(h, feed_forward)
-            math.rmsNorm(state.work, state.input, self.feed_forward_norm[i * dim .. (i + 1) * dim]);
+            math.rmsNorm(state.work, state.input, layer.ffn_norm);
 
             // Calculate FeedForward.forward(x):
             //     return w2( silu(w1(x)) * w3(x) )
 
-            const ffn_o = i * dim * c.hidden_dim;
-            const ffn_e = (i + 1) * dim * c.hidden_dim;
             // hid1 = w1(x)
+            math.matrixMul(state.hidden1, layer.w1, state.work, c.hidden_dim, dim);
             // hid2 = w3(x)
-            const w1 = self.w1[ffn_o..ffn_e];
-            math.matrixMul(state.hidden1, w1, state.work, c.hidden_dim, dim);
-            const w3 = self.w3[ffn_o..ffn_e];
-            math.matrixMul(state.hidden2, w3, state.work, c.hidden_dim, dim);
+            math.matrixMul(state.hidden2, layer.w3, state.work, c.hidden_dim, dim);
 
             // Calculate SwiGLU
             math.swiglu(state.hidden1);
             math.elementProduct(state.hidden1, state.hidden1, state.hidden2);
 
             // w2 * (swiglu(w2(x)) * w3(x))
-            const w2 = self.w2[ffn_o..ffn_e];
-            math.matrixMul(state.work, w2, state.hidden1, dim, c.hidden_dim);
+            math.matrixMul(state.work, layer.w2, state.hidden1, dim, c.hidden_dim);
             // Done with FeedForward.forward(x)
 
             // Add back `h` to result of FeedForward.forward(x)
@@ -1167,9 +1228,9 @@ pub const TransformerV1 = struct {
             // Done with TransformerBlock.forward();
             //std.debug.print("Done with layer {d}/{d} with {d} at {d}\n", .{ i, c.n_layers, token, n_token });
 
-            layer.completeOne();
+            layer_progress.completeOne();
         }
-        layer.end();
+        layer_progress.end();
 
         var ending = progress.start("Token Output", 2);
 

@@ -56,22 +56,33 @@ pub fn main() !void {
     try stdout.print("Loading model config\n", .{});
 
     var alloc = gpa.allocator();
+    //var alloc = std.heap.page_allocator;
 
     const model_path: []const u8 = res.args.model orelse "llama2-7b.bin";
     const tokenizer_path = res.args.tokenizer orelse "tokenizer.bin";
 
-    const context = if (std.mem.eql(u8, model_format, "ggml"))
+    var context = if (std.mem.eql(u8, model_format, "ggml"))
         try llama.load_from_ggml(model_path, alloc)
     else
         try load_llama2(tokenizer_path, model_path, alloc);
 
+    defer context.deinit();
+
     var state = context.state;
-    defer state.deinit();
     var transformer = context.transformer;
-    defer transformer.deinit();
     var tokenizer = context.tokenizer;
-    defer tokenizer.deinit();
     const config = context.config;
+
+    try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}, shared_classifier: {}\n", .{
+        config.dim,
+        config.hidden_dim,
+        config.n_layers,
+        config.n_heads,
+        config.n_kv_heads,
+        config.vocab_size,
+        config.max_seq_length,
+        config.shared_classifier,
+    });
 
     if (res.args.prompt == null) {
         try stdout.print("Falling back to default prompt\n", .{});
@@ -127,9 +138,6 @@ pub fn main() !void {
 
         try stdout.print("In: {d} <<{s}>>; Out: {d} <<{s}>>\n", .{ token, chars_in, decoded, chars });
         token = decoded;
-        if (n == 20) {
-            break;
-        }
     }
 
     try stdout.print("Done\nCleaning up\n", .{});
@@ -142,16 +150,6 @@ fn load_llama2(tokenizer_path: []const u8, model_path: []const u8, alloc: std.me
     const stdout = stdout_file.writer();
 
     try stdout.print("loaded config\n", .{});
-    try stdout.print("dim: {d}, hidden: {d}, n_layers: {d}, n_heads: {d}, n_kv: {d}, vocab: {d}, max_seq: {d}, shared_classifier: {}\n", .{
-        config.dim,
-        config.hidden_dim,
-        config.n_layers,
-        config.n_heads,
-        config.n_kv_heads,
-        config.vocab_size,
-        config.max_seq_length,
-        config.shared_classifier,
-    });
 
     var tokenizer = try Tokenizer.init(tokenizer_path, alloc, config.vocab_size);
     errdefer tokenizer.deinit();
@@ -170,5 +168,6 @@ fn load_llama2(tokenizer_path: []const u8, model_path: []const u8, alloc: std.me
         .transformer = transformer,
         .tokenizer = tokenizer,
         .state = state,
+        //.file = null,
     };
 }

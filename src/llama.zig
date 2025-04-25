@@ -90,7 +90,8 @@ pub const Config = struct {
         const n_heads = try reader.readInt(i32, .little);
         const n_kv_heads = try reader.readInt(i32, .little);
         const vocab_size = try reader.readInt(i32, .little);
-        const max_seq_length = try reader.readInt(i32, .little);
+        // this is actually double what the V1 export file reports
+        const max_seq_length = try reader.readInt(i32, .little) * 2;
 
         // Next byte indicates if the token embeddings are shared between the last layer of the
         // model and the tokenizer embeddings.
@@ -214,7 +215,7 @@ pub const Tokenizer = struct {
         }
 
         // Sort the token so that the `chars` elements are in order
-        dumpTokens(tokens);
+        //dumpTokens(tokens);
         tokens.sortUnstable(Sorter{ .toks = &tokens });
 
         // `tokens` is now sorted by the source bytes/characters of each token entry in
@@ -868,7 +869,7 @@ pub const TransformerBlock = struct {
         var buf = [_]u8{0} ** 64;
         const full_name = std.fmt.bufPrint(&buf, "blk.{d}.{s}.weight", .{ n, name }) catch unreachable;
         if (file.getTensorInfo(full_name)) |tensor| {
-            return tensor.getElems(file.tensor_data_offset, T);
+            return tensor.getElems(T, file.tensor_data_offset);
         }
         std.debug.print("Error: Tensor {s} does not exist in the GGUF file", .{full_name});
         @panic("Could not load tensor");
@@ -1102,7 +1103,7 @@ pub const TransformerV1 = struct {
 
         const token_offset: usize = @as(usize, @intCast(token)) * dim;
         const embeddings = self.token_embed[token_offset .. token_offset + dim];
-        @memcpy(state.input[0..dim], embeddings);
+        @memcpy(state.input, embeddings);
 
         const layer_progress = progress.start("Layer", c.n_layers);
 
@@ -1422,6 +1423,11 @@ pub const Params = struct {
                 return token.t;
             }
         }
+
+        // Prevent OOB ref
+        if (last_idx == self.vocab_size) {
+            last_idx = self.vocab_size - 1;
+        }
         // Did not find a token. Just return the last one
         return tokens[last_idx].t;
     }
@@ -1432,6 +1438,17 @@ pub const LlamaContext = struct {
     transformer: TransformerV1,
     state: State,
     tokenizer: Tokenizer,
+    file: ?ggml.GGUFFile = null,
+
+    pub fn deinit(self: *@This()) void {
+        self.transformer.deinit();
+        self.state.deinit();
+        self.tokenizer.deinit();
+        if (self.file) |*inner| {
+            inner.deinit();
+        }
+        self.file = null;
+    }
 };
 
 /// Load a Llama context from the provided file
@@ -1450,6 +1467,7 @@ pub fn load_from_ggml(file_name: []const u8, alloc: std.mem.Allocator) !LlamaCon
 
     if (file.getValue(ggml.arch_key)) |arch| {
         if (!std.mem.eql(u8, arch.*.string.str, "llama")) {
+            std.debug.print("arch_key is wrong\n", .{});
             return Error.BadFormat;
         }
     } else {
@@ -1466,15 +1484,15 @@ pub fn load_from_ggml(file_name: []const u8, alloc: std.mem.Allocator) !LlamaCon
 
     const config = Config.readGGUF(file);
 
-    // Loaded Tokenizer
+    // Load Tokenizer
     var tokenizer = try Tokenizer.initGGUF(file, alloc);
     errdefer tokenizer.deinit();
 
     var state = try State.init(alloc, config);
     errdefer state.deinit();
 
-    // TODO: Load model weights
-    const token_embed = try loadWeights(f32, file, "token_embd.weight");
+    // Load Transformer Weights
+    const token_embed = try loadWeights(f32, file, "token_embd.weight"); // sic
     const output_norm = try loadWeights(f32, file, "output_norm.weight");
     const output_weight = try loadWeights(f32, file, "output.weight");
 
@@ -1505,12 +1523,13 @@ pub fn load_from_ggml(file_name: []const u8, alloc: std.mem.Allocator) !LlamaCon
         .transformer = transformer,
         .state = state,
         .tokenizer = tokenizer,
+        .file = file,
     };
 }
 
 fn loadWeights(T: type, file: ggml.GGUFFile, name: []const u8) ![]const T {
     if (file.getTensorInfo(name)) |tensor| {
-        return (&tensor).getElems(file.tensor_data_offset, T);
+        return (&tensor).getElems(T, file.tensor_data_offset);
     }
     std.debug.print("Missing tensor weights in file: {s}\n", .{name});
     return Error.BadFile;

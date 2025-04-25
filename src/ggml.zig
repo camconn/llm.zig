@@ -411,7 +411,7 @@ pub const GGUFFile = struct {
                 },
             }
         else {
-            std.debug.print("\"{s}\" must be set\n", .{arch_key});
+            std.debug.print("\"{s}\" is not present\n", .{arch_key});
             return Error.Format;
         };
 

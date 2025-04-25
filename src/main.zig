@@ -62,7 +62,7 @@ pub fn main() !void {
     const tokenizer_path = res.args.tokenizer orelse "tokenizer.bin";
 
     var context = if (std.mem.eql(u8, model_format, "ggml"))
-        try llama.load_from_ggml(model_path, alloc)
+        try llama.LlamaContext.init(model_path, alloc)
     else
         try load_llama2(tokenizer_path, model_path, alloc);
 

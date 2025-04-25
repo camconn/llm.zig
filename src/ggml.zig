@@ -532,7 +532,7 @@ pub fn main() !void {
     var GPA = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = GPA.allocator();
 
-    const path = "Llama-2-7B-F32.gguf";
+    const path = "llama2-7b-f32.gguf";
     std.debug.print("Reading file {s}\n", .{path});
     var file = try GGUFFile.read_file(path, alloc);
     defer file.deinit();
@@ -542,6 +542,8 @@ pub fn main() !void {
     for (file.metadata) |kv| {
         switch (kv.value_type) {
             .uint32 => std.debug.print("{s}: u32 {d}\n", .{ kv.key.str, kv.value.uint32 }),
+            .uint64 => std.debug.print("{s}: u64 {d}\n", .{ kv.key.str, kv.value.uint64 }),
+            .string => std.debug.print("{s}: {s}\n", .{ kv.key.str, kv.value.string.str }),
             else => std.debug.print("{s}: {}\n", .{ kv.key.str, kv.value_type }),
         }
     }

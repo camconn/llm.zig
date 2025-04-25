@@ -16,9 +16,13 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 pub const Error = error{
-    BadFile,
+    /// You attempted to load a file that has an invalid format. Usually this means the file had
+    /// a bad header or the wrong version. This could also mean that the file is truncated or has
+    /// extra data at the end.
     BadFormat,
-    Other,
+    /// You tried to load a file that has a correct format but is semantically incorrect. Usually
+    /// this means you tried to load the wrong model.
+    BadFile,
 };
 
 pub const Config = struct {
@@ -40,7 +44,7 @@ pub const Config = struct {
             .n_layers = file.getValue("llama.block_count").?.uint32,
             .n_heads = file.getValue("llama.attention.head_count").?.uint32,
             .n_kv_heads = file.getValue("llama.attention.head_count_kv").?.uint32,
-            .vocab_size = file.getValue("llama.vocab_size").?.uint32,
+            .vocab_size = file.getValue("tokenizer.ggml.tokens").?.array.len,
             .max_seq_length = file.getValue("llama.context_length").?.uint32,
             .shared_classifier = file.getValue("output.weight") == null,
         };
@@ -69,19 +73,22 @@ pub const Config = struct {
         return try Config.read_inner(buffer.reader());
     }
 
+    const magic_v1_str = "ak42";
+    const magic_v1_num = std.mem.readInt(u32, magic_v1_str, .little);
+
     /// Read a "Version 1" `llama.bin` file as exported by `llama2.c/export.py`
     fn read_inner(reader: anytype) !Config {
         // Assume the machine which exports the v1 file is Little-Endian, which make parsing
         // easier.
         // First, we have the header
         const magic = try reader.readInt(u32, .little);
-        if (magic != 0x616b3432) { // ak42
-            return error.BadMagic;
+        if (magic != magic_v1_num) {
+            return Error.BadFormat;
         }
         // Next, a signed integer for the export version
         const version = try reader.readInt(i32, .little);
         if (version != 1) {
-            return error.Version;
+            return error.BadFormat;
         }
         // The next 7 values are 32 bit signed numbers
         const dim = try reader.readInt(i32, .little);
@@ -90,7 +97,8 @@ pub const Config = struct {
         const n_heads = try reader.readInt(i32, .little);
         const n_kv_heads = try reader.readInt(i32, .little);
         const vocab_size = try reader.readInt(i32, .little);
-        // this is actually double what the V1 export file reports
+        // There's a bug in the `export.py` method. It actually hard-codes the sequence length to
+        // 2048 for V1 which is incorrect. That is at most half of the actual sequence length.
         const max_seq_length = try reader.readInt(i32, .little) * 2;
 
         // Next byte indicates if the token embeddings are shared between the last layer of the
@@ -243,11 +251,10 @@ pub const Tokenizer = struct {
     fn initGGUF(file: ggml.GGUFFile, allocator: Allocator) !Tokenizer {
         const context_len = file.getValue("llama.context_length").?.uint32;
 
-        const vocab_size = file.getValue("llama.vocab_size").?.uint32;
         const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
         const token_scores = file.getValue("tokenizer.ggml.scores").?.array;
-        const token_ids = file.getValue("tokenizer.ggml.tokens").?.array;
-        std.debug.print("token ids: {}\n", .{token_ids.elem_type});
+        // The vocabulary size is equivalent to the length of the tokens array.
+        const vocab_size = token_chars.len;
 
         var arena = ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -1017,7 +1024,9 @@ pub const TransformerV1 = struct {
 
         // make sure we read the whole file.
         const used_size = i * @sizeOf(f32) + header_len;
-        std.debug.assert(fsize == used_size);
+        if (fsize != used_size) {
+            return Error.BadFile;
+        }
 
         // Convert weight slices to `TransformerBlock`s.
         const dim2 = dim * dim;
@@ -1440,6 +1449,88 @@ pub const LlamaContext = struct {
     tokenizer: Tokenizer,
     file: ?ggml.GGUFFile = null,
 
+    /// Initialize and read a new Llama V1 or V2 inference context from a provided GGUF file.
+    pub fn init(file_name: []const u8, alloc: std.mem.Allocator) !LlamaContext {
+        var file = try ggml.GGUFFile.read_file(file_name, alloc);
+        errdefer file.deinit();
+
+        // No longer require a specific name, just print out and make a best effort attempt to make
+        // sure the name has "Llama" in it.
+        if (file.getValue(ggml.name_key)) |name| {
+            const inner = name.*.string.str;
+            if (std.ascii.indexOfIgnoreCase(inner, "llama") == null) {
+                std.debug.print("Model does not report as llama. Found name: {s}\n", .{inner});
+                return Error.BadFile;
+            }
+        } else {
+            @panic("Could not find GGML model name");
+        }
+
+        if (file.getValue(ggml.arch_key)) |arch| {
+            const inner = arch.*.string.str;
+            if (!std.mem.eql(u8, inner, "llama")) {
+                std.debug.print("{s} is wrong\n", .{inner});
+                return Error.BadFile;
+            }
+        } else {
+            @panic("Could not find architecture key");
+        }
+
+        if (file.getValue("tokenizer.ggml.model")) |tok_model| {
+            const model_name = tok_model.*.string.str;
+            if (!std.mem.eql(u8, model_name, "llama")) {
+                std.debug.print("Model reports to be {s} and not \"llama\"!\n", .{model_name});
+                return Error.BadFile;
+            }
+        } else {
+            @panic("Could not find tokenizer model key");
+        }
+
+        const config = Config.readGGUF(file);
+
+        // Load Tokenizer
+        var tokenizer = try Tokenizer.initGGUF(file, alloc);
+        errdefer tokenizer.deinit();
+
+        var state = try State.init(alloc, config);
+        errdefer state.deinit();
+
+        // Load Transformer Weights
+        const token_embed = try loadWeights(f32, file, "token_embd.weight"); // sic
+        const output_norm = try loadWeights(f32, file, "output_norm.weight");
+        const output_weight = try loadWeights(f32, file, "output.weight");
+
+        var arena = ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+
+        var arena_alloc = arena.allocator();
+        var layers = try arena_alloc.alloc(TransformerBlock, config.n_layers);
+        for (0..config.n_layers) |i| {
+            layers[i] = TransformerBlock.initGGML(file, config, i);
+        }
+
+        const transformer = TransformerV1{
+            .fd = -1,
+            .ptr = null,
+            .arena = arena,
+
+            .config = config,
+
+            .token_embed = token_embed,
+            .layers = layers,
+            .norm = output_norm,
+            .classifier = output_weight,
+        };
+
+        return LlamaContext{
+            .config = config,
+            .transformer = transformer,
+            .state = state,
+            .tokenizer = tokenizer,
+            .file = file,
+        };
+    }
+
     pub fn deinit(self: *@This()) void {
         self.transformer.deinit();
         self.state.deinit();
@@ -1450,82 +1541,6 @@ pub const LlamaContext = struct {
         self.file = null;
     }
 };
-
-/// Load a Llama context from the provided file
-pub fn load_from_ggml(file_name: []const u8, alloc: std.mem.Allocator) !LlamaContext {
-    var file = try ggml.GGUFFile.read_file(file_name, alloc);
-    errdefer file.deinit();
-
-    // Verify names
-    if (file.getValue(ggml.name_key)) |name| {
-        if (!std.mem.eql(u8, name.*.string.str, "llama2-7b")) {
-            return Error.BadFile;
-        }
-    } else {
-        @panic("Could not find GGML model name");
-    }
-
-    if (file.getValue(ggml.arch_key)) |arch| {
-        if (!std.mem.eql(u8, arch.*.string.str, "llama")) {
-            std.debug.print("arch_key is wrong\n", .{});
-            return Error.BadFormat;
-        }
-    } else {
-        @panic("Could not find architecture key");
-    }
-
-    if (file.getValue("tokenizer.ggml.model")) |tok_model| {
-        if (!std.mem.eql(u8, tok_model.*.string.str, "llama")) {
-            return Error.BadFormat;
-        }
-    } else {
-        @panic("Could not find tokenizer model key");
-    }
-
-    const config = Config.readGGUF(file);
-
-    // Load Tokenizer
-    var tokenizer = try Tokenizer.initGGUF(file, alloc);
-    errdefer tokenizer.deinit();
-
-    var state = try State.init(alloc, config);
-    errdefer state.deinit();
-
-    // Load Transformer Weights
-    const token_embed = try loadWeights(f32, file, "token_embd.weight"); // sic
-    const output_norm = try loadWeights(f32, file, "output_norm.weight");
-    const output_weight = try loadWeights(f32, file, "output.weight");
-
-    var arena = ArenaAllocator.init(alloc);
-    errdefer arena.deinit();
-
-    var arena_alloc = arena.allocator();
-    var layers = try arena_alloc.alloc(TransformerBlock, config.n_layers);
-    for (0..config.n_layers) |i| {
-        layers[i] = TransformerBlock.initGGML(file, config, i);
-    }
-
-    const transformer = TransformerV1{
-        .fd = -1,
-        .ptr = null,
-        .arena = arena,
-
-        .config = config,
-
-        .token_embed = token_embed,
-        .layers = layers,
-        .norm = output_norm,
-        .classifier = output_weight,
-    };
-
-    return LlamaContext{
-        .config = config,
-        .transformer = transformer,
-        .state = state,
-        .tokenizer = tokenizer,
-        .file = file,
-    };
-}
 
 fn loadWeights(T: type, file: ggml.GGUFFile, name: []const u8) ![]const T {
     if (file.getTensorInfo(name)) |tensor| {

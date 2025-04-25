@@ -92,8 +92,11 @@ pub const String = struct {
     fn read(reader: Reader, alloc: std.mem.Allocator) Error!String {
         const len = try (reader.readInt(u64, .little) catch Error.EOF);
         const buf = try (alloc.alloc(u8, len) catch Error.EOF);
+
         const n_read = reader.read(buf) catch 0;
-        std.debug.assert(n_read == len);
+        if (n_read == 0 or n_read != len) {
+            return Error.FileError;
+        }
         return .{ .len = len, .str = buf };
     }
 };
@@ -457,7 +460,7 @@ pub const GGUFFile = struct {
         alloc: std.mem.Allocator,
     ) ![]MetadataKV {
         var ret = std.ArrayList(MetadataKV).init(alloc);
-        errdefer ret.deinit();
+        defer ret.deinit();
         try ret.ensureTotalCapacityPrecise(@intCast(metadata_count));
 
         for (0..metadata_count) |_| {
@@ -482,6 +485,7 @@ pub const GGUFFile = struct {
     fn getMetadataValue(key: []const u8, metadata: []MetadataKV) ?*const Value {
         for (metadata) |kv| {
             if (std.mem.eql(u8, key, kv.key.str)) {
+                std.debug.print("", .{}); // Work around compiler bug for `-Doptimize=ReleaseXXX`
                 return &kv.value;
             }
         }

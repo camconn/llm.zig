@@ -276,17 +276,17 @@ pub const TensorInfo = struct {
 
     /// Get a raw slice of the Tensor's data in native model order.
     /// Get the elements of this tensor from the files `mmap(2)` pointer.
-    pub fn getElems(self: Self, data_start: usize, T: type) []const T {
+    pub fn getElems(self: Self, T: type, data_start: usize) []const T {
         // TODO: Figure out a better way of enforcing type safety.
         //std.debug.assert(T == self.getElemType());
 
         const target = data_start + self.offset;
 
-        var len: usize = @intCast(self.dimensions[0]);
-        for (1..self.dim) |dim| {
-            len *= @intCast(dim);
+        var len: usize = 1;
+        for (0..self.dim) |i| {
+            len *= @intCast(self.dimensions[i]);
         }
-        std.debug.assert(len != 0);
+        std.debug.assert(len >= 1);
 
         const ptr: [*]T = @ptrFromInt(target);
         return ptr[0..len];
@@ -433,7 +433,7 @@ pub const GGUFFile = struct {
         const offset: usize = @intCast(try reader.context.getPos());
         std.debug.print("Current file offset is {d}\n", .{offset});
 
-        const tensor_data_offset = std.mem.alignForward(usize, offset, @intCast(alignment));
+        const tensor_data_offset = std.mem.alignForward(usize, offset + @intFromPtr(ptr.ptr), @intCast(alignment));
         std.debug.print("Tensor_data starts at {d}\n", .{tensor_data_offset});
 
         return .{

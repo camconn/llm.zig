@@ -1450,41 +1450,13 @@ pub const LlamaContext = struct {
     file: ?ggml.GGUFFile = null,
 
     /// Initialize and read a new Llama V1 or V2 inference context from a provided GGUF file.
+    /// Returns an `Error.BadFile` whenever the file is an unsupported model or quantization
+    /// format.
     pub fn init(file_name: []const u8, alloc: std.mem.Allocator) !LlamaContext {
         var file = try ggml.GGUFFile.read_file(file_name, alloc);
         errdefer file.deinit();
 
-        // No longer require a specific name, just print out and make a best effort attempt to make
-        // sure the name has "Llama" in it.
-        if (file.getValue(ggml.name_key)) |name| {
-            const inner = name.string.str;
-            if (std.ascii.indexOfIgnoreCase(inner, "llama") == null) {
-                std.debug.print("Model does not report as llama. Found name: {s}\n", .{inner});
-                return Error.BadFile;
-            }
-        } else {
-            @panic("Could not find GGML model name");
-        }
-
-        if (file.getValue(ggml.arch_key)) |arch| {
-            const inner = arch.string.str;
-            if (!std.mem.eql(u8, inner, "llama")) {
-                std.debug.print("{s} is wrong\n", .{inner});
-                return Error.BadFile;
-            }
-        } else {
-            @panic("Could not find architecture key");
-        }
-
-        if (file.getValue("tokenizer.ggml.model")) |tok_model| {
-            const model_name = tok_model.string.str;
-            if (!std.mem.eql(u8, model_name, "llama")) {
-                std.debug.print("Model reports to be {s} and not \"llama\"!\n", .{model_name});
-                return Error.BadFile;
-            }
-        } else {
-            @panic("Could not find tokenizer model key");
-        }
+        try ensureCorrectModel(file);
 
         const config = Config.readGGUF(file);
 
@@ -1496,9 +1468,11 @@ pub const LlamaContext = struct {
         errdefer state.deinit();
 
         // Load Transformer Weights
-        const token_embed = try loadWeights(f32, file, "token_embd.weight"); // sic
+        const EmbedType = f32;
+        const token_embed = try loadWeights(EmbedType, file, "token_embd.weight"); // sic
         const output_norm = try loadWeights(f32, file, "output_norm.weight");
-        const output_weight = try loadWeights(f32, file, "output.weight");
+        const OutputType = f32;
+        const output_weight = try loadWeights(OutputType, file, "output.weight");
 
         var arena = ArenaAllocator.init(alloc);
         errdefer arena.deinit();
@@ -1529,6 +1503,57 @@ pub const LlamaContext = struct {
             .tokenizer = tokenizer,
             .file = file,
         };
+    }
+
+    /// Ensure the provided GGUF `file` is correct and that we can actually load it.
+    /// Ensures that the loaded file is correct and is in a quantization format we actually
+    /// support.
+    fn ensureCorrectModel(file: ggml.GGUFFile) !void {
+        // No longer require a specific name, just print out and make a best effort attempt to make
+        // sure the name has "Llama" in it.
+        if (file.getValue(ggml.name_key)) |name| {
+            const inner = name.string.str;
+            if (std.ascii.indexOfIgnoreCase(inner, "llama") == null) {
+                std.debug.print("Model does not report as llama. Found name: {s}\n", .{inner});
+                return Error.BadFile;
+            }
+        } else {
+            std.debug.print("llama: Could not find GGML model name: {s}\n", .{ggml.name_key});
+            return Error.BadFile;
+        }
+
+        if (file.getValue(ggml.arch_key)) |arch| {
+            const inner = arch.string.str;
+            if (!std.mem.eql(u8, inner, "llama")) {
+                std.debug.print("{s} is wrong\n", .{inner});
+                return Error.BadFile;
+            }
+        } else {
+            std.debug.print("llama: Could not find model architecture: {s}\n", .{ggml.arch_key});
+            return Error.BadFile;
+        }
+
+        const tokenizer_key = "tokenizer.ggml.model";
+        if (file.getValue(tokenizer_key)) |tok_model| {
+            const model_name = tok_model.string.str;
+            if (!std.mem.eql(u8, model_name, "llama")) {
+                std.debug.print("Model reports to be {s} and not \"llama\"!\n", .{model_name});
+                return Error.BadFile;
+            }
+        } else {
+            std.debug.print("llama: Missing tokenizer model {s}\n", .{tokenizer_key});
+            return error.BadFile;
+        }
+
+        if (file.fileType()) |ft| {
+            if (ft != .ALL_F32 and ft != .MOSTLY_Q8_0) {
+                std.debug.print("llama: Unsupported quantization: {}\n", .{ft});
+                return error.BadFile;
+            }
+        } else {
+            std.debug.print("llama: Could not load file type\n", .{});
+            return error.BadFile;
+        }
     }
 
     pub fn deinit(self: *@This()) void {

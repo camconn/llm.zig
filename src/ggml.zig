@@ -586,6 +586,24 @@ pub const GGUFFile = struct {
         }
         return null;
     }
+
+    /// Retrieve the declared file type of this GGUF file.
+    /// Returns `null` if there is no declared file type, or the value is invalid.
+    pub fn fileType(self: Self) ?FileType {
+        if (self.getValue(file_type_key)) |inner| {
+            if (inner != .uint32) {
+                const as_enum: MetadataType = inner;
+                std.debug.print("ggml: {s} was present but had wrong type: {}\n", .{ file_type_key, as_enum });
+                return null;
+            }
+
+            const val = inner.uint32;
+            if (val < max_file_type) {
+                return @enumFromInt(val);
+            }
+        }
+        return null;
+    }
 };
 
 pub fn main() !void {

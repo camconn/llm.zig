@@ -446,7 +446,6 @@ pub fn quantize(comptime format: WeightFormat, ws: []const f32, allocator: std.m
         // In the GGML reference the scale is inverted so that a cheaper multiply op can be
         // used element-wise.
         const inv_scale = if (scale == 0) 1 else 1 / scale; // ternary because divide-by-zero
-        std.debug.print("inv_scale: {d}\n", .{inv_scale});
 
         for (0..block_size) |j| {
             const old = elems[j];
@@ -498,4 +497,55 @@ test "quantize weights" {
         17, 31, 32, 33, 60, 63, 64, 65, 69, 70, 71, 72, 124, 125, 126, 127,
     };
     try std.testing.expectEqualSlices(i8, &no_scale_exp, &q80_no_scale[0][0][1]);
+    try std.testing.expectEqual(0, q80_no_scale[1]);
+}
+
+/// Dequantize weights
+pub fn dequantize(comptime format: WeightFormat, weights: []const Block(format), allocator: std.mem.Allocator) ![]const f32 {
+    if (weights.len == 0) {
+        return error.Empty;
+    }
+
+    if (format == .Float32) {
+        return weights;
+    }
+
+    const BlockType = Block(format);
+    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
+    const block_size = array_info.len;
+
+    const n_out = weights.len * block_size;
+    var out = try allocator.alloc(f32, n_out);
+    errdefer allocator.free(out);
+
+    for (0..weights.len) |i| {
+        const block = weights[i];
+
+        const idx = block_size * i;
+
+        const scale = block[0];
+        for (0..block_size) |j| {
+            const elem = block[1][j];
+            const elem_f: f32 = @floatFromInt(elem);
+            out[idx + j] = elem_f * scale;
+        }
+    }
+    return out;
+}
+
+test "dequantize weights" {
+    const empty = [0]f32{};
+    try std.testing.expectError(error.Empty, dequantize(.Float32, &empty, std.testing.allocator));
+    const empty_q80 = [0]Block(.Q8_0){};
+    try std.testing.expectError(error.Empty, dequantize(.Q8_0, &empty_q80, std.testing.allocator));
+
+    const no_scale = [_]f32{
+        1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,  14,  15,  16,
+        17, 31, 32, 33, 60, 63, 64, 65, 69, 70, 71, 72, 124, 125, 126, 127,
+    };
+
+    const q80_no_scale = try quantize(.Q8_0, &no_scale, std.testing.allocator);
+    defer std.testing.allocator.free(q80_no_scale[0]);
+    const out_dequantized = try dequantize(.Q8_0, q80_no_scale[0], std.testing.allocator);
+    defer std.testing.allocator.free(out_dequantized);
 }

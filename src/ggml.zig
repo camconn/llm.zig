@@ -507,7 +507,7 @@ pub const GGUFFile = struct {
 
     pub fn dumpMetadata(self: *const Self) void {
         for (self.metadata) |kv| {
-            const value_type: MetadataType = kv;
+            const value_type: MetadataType = kv.value;
             switch (value_type) {
                 .string => std.debug.print("{s}={s}\n", .{ kv.key.str, kv.value.string.str }),
                 .uint32 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.uint32 }),

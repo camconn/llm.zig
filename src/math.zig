@@ -374,11 +374,13 @@ test "dotProduct" {
     try std.testing.expectEqual(1688, dotProduct(&x, &y));
 }
 
-/// Quantization of AI model weights.
+/// Quantization types for AI model weights.
 pub const WeightFormat = enum {
     /// Uncompressed weights in `f32` form.
+    /// This is not actually a quantization, but a pseudo-type for internal purposes.
     Float32,
-    /// 8 Bits per weight
+    /// Represents 8 bit weights scaled by a single precision float `d` for every 32 weights.
+    /// The original weight `w = i * d` where `i` is the quantized integer and `d` is the scale.
     Q8_0,
 };
 
@@ -395,6 +397,7 @@ test "Block() size" {
     const F32Block = Block(.Float32);
     try std.testing.expectEqual(@sizeOf(f32), @sizeOf(F32Block));
 
+    // Ensure Q8_0 compatibility when reading from a GGUF file.
     const Q8_0Block = Block(.Q8_0);
     try std.testing.expectEqual(@sizeOf(f32) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
 }

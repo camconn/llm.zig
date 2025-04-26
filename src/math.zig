@@ -9,11 +9,11 @@
 const std = @import("std");
 
 /// Vector item for non-quantized Neural Networks.
-pub const Elem = f32;
+const Elem = f32;
 /// Default vector length for non-quantized networks.
-pub const vector_len = std.simd.suggestVectorLength(Elem) orelse 8;
+const vector_len = std.simd.suggestVectorLength(Elem) orelse 8;
 /// Floating point Vector type for non-quantized math.
-pub const Vec = @Vector(vector_len, Elem);
+const Vec = @Vector(vector_len, Elem);
 
 /// Create a custom vector definition for an arbitrary type `T`.
 fn Vect(comptime T: type) type {

@@ -8,7 +8,52 @@
 
 const std = @import("std");
 
-/// Create a custom vector definition for an arbitrary type `T`.
+/// Helper struct for referencing quantized weights.
+/// Contains a slice of `Block`s in `WeightFormat` to use when performing calculations.
+pub const Weights = union(WeightFormat) {
+    f32: Block(.f32),
+    q8_0: Block(.q8_0),
+};
+
+/// Quantization types for model weights.
+pub const WeightFormat = enum {
+    /// Uncompressed weights in `f32` form.
+    /// This is not actually a quantization, but a pseudo-type for internal purposes.
+    /// Blocks of `f32` are just the individual `f32` weights.
+    f32,
+    /// Represents 8 bit weights scaled by a single precision float `d` for every 32 weights.
+    /// The original weight `w = i * d` where `i` is the quantized integer and `d` is the scale.
+    q8_0,
+};
+
+/// On-disk structure of the serialized `Q8_0` format in GGML. See [1] for more info.
+/// [1]: https://github.com/ggml-org/llama.cpp/blob/2d451c80590b9ac250322769ac13d3b4870dbcf7/ggml/src/ggml-common.h#L213
+const Q80Block = extern struct {
+    scale: f32,
+    // QK8_0 = 32 in the ggml reference
+    weights: [32]i8,
+};
+
+/// Get the block format for a given `format` in memory on on disk.
+/// For non-f32 type weight blocks, the returned struct must have a `scale` and `weights` field
+/// for compatibility with compiled code.
+pub fn Block(format: WeightFormat) type {
+    return switch (format) {
+        .f32 => f32,
+        .q8_0 => Q80Block,
+    };
+}
+
+test "Block() size" {
+    const F32Block = Block(.f32);
+    try std.testing.expectEqual(@sizeOf(f32), @sizeOf(F32Block));
+
+    // Ensure Q8_0 compatibility when reading from a GGUF file.
+    const Q8_0Block = Block(.q8_0);
+    try std.testing.expectEqual(@sizeOf(f32) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
+}
+
+/// Create a SIMD vector for arbitrary type `T`.
 fn Vect(comptime T: type) type {
     const len = comptime std.simd.suggestVectorLength(T) orelse 8;
     return @Vector(len, T);
@@ -17,13 +62,16 @@ fn Vect(comptime T: type) type {
 /// Helper method to get the length of a vector from `Vect`
 fn vectLen(comptime T: type) usize {
     if (@typeInfo(T) != .vector) {
-        @compileError("You can only call this on Vector types");
+        @compileError("Only implemented on `Vector()` and @Vector(.., ..) types");
     }
     return @typeInfo(T).vector.len;
 }
 
 /// Helper method to get the child elements of a vector type from `Vect`.
 fn VectElem(comptime T: type) type {
+    if (@typeInfo(T) != .vector) {
+        @compileError("Only implemented on `Vector()` and @Vector(.., ..) types");
+    }
     return @typeInfo(T).vector.child;
 }
 
@@ -53,39 +101,6 @@ test "Vect setup" {
         try std.testing.expectEqual(len_expected, len);
         try std.testing.expectEqual(child_expected, child);
     };
-}
-
-/// Quantization types for model weights.
-pub const WeightFormat = enum {
-    /// Uncompressed weights in `f32` form.
-    /// This is not actually a quantization, but a pseudo-type for internal purposes.
-    Float32,
-    /// Represents 8 bit weights scaled by a single precision float `d` for every 32 weights.
-    /// The original weight `w = i * d` where `i` is the quantized integer and `d` is the scale.
-    Q8_0,
-};
-
-const Q80Block = extern struct {
-    scale: f32,
-    // QK8_0 = 32 in the ggml reference
-    weights: [32]i8,
-};
-
-/// Represents the native on-disk and in-memory structure
-pub fn Block(format: WeightFormat) type {
-    return switch (format) {
-        .Float32 => f32,
-        .Q8_0 => Q80Block,
-    };
-}
-
-test "Block() size" {
-    const F32Block = Block(.Float32);
-    try std.testing.expectEqual(@sizeOf(f32), @sizeOf(F32Block));
-
-    // Ensure Q8_0 compatibility when reading from a GGUF file.
-    const Q8_0Block = Block(.Q8_0);
-    try std.testing.expectEqual(@sizeOf(f32) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
 }
 
 /// Perform RMS Normalization on `x` with the weights `y` and store the result in `out`.
@@ -479,7 +494,7 @@ pub fn quantize(
     }
 
     // No conversion necessary
-    if (format == .Float32) {
+    if (format == .f32) {
         return .{ ws, 0 };
     }
 
@@ -493,7 +508,7 @@ pub fn quantize(
     errdefer allocator.free(blocks);
 
     const err = switch (format) {
-        .Q8_0 => quantize_q8_0(ws, blocks),
+        .q8_0 => quantize_q8_0(ws, blocks),
         else => @compileError("quantize method is unimplemented for " ++ format),
     };
 
@@ -512,11 +527,11 @@ const max_magnitude = struct {
 };
 
 // TODO: Vectorize this
-fn quantize_q8_0(in: []const f32, blocks: []Block(.Q8_0)) f32 {
+fn quantize_q8_0(in: []const f32, blocks: []Block(.q8_0)) f32 {
     // Calculate max error
     var err: f32 = 0;
     const n_blocks = blocks.len;
-    const BlockType = Block(.Q8_0);
+    const BlockType = Block(.q8_0);
     const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
     const ArrayElem = array_info.child;
     const block_size = array_info.len;
@@ -560,10 +575,10 @@ fn quantize_q8_0(in: []const f32, blocks: []Block(.Q8_0)) f32 {
 
 test "quantize weights" {
     const empty: [0]f32 = [0]f32{};
-    try std.testing.expectError(error.Empty, quantize(.Float32, &empty, std.testing.allocator));
+    try std.testing.expectError(error.Empty, quantize(.f32, &empty, std.testing.allocator));
 
     const f32s = [_]f32{ 1, 2, 3, 4, 5 };
-    const f32_quant = try quantize(.Float32, &f32s, std.testing.allocator);
+    const f32_quant = try quantize(.f32, &f32s, std.testing.allocator);
     try std.testing.expectEqualSlices(f32, &f32s, f32_quant[0]);
     try std.testing.expectEqual(0, f32_quant[1]);
 
@@ -572,7 +587,7 @@ test "quantize weights" {
         17, 31, 32, 33, 60, 63, 64, 65, 69, 70, 71, 72, 124, 125, 126, 127,
     };
 
-    const q80_no_scale = try quantize(.Q8_0, &no_scale, std.testing.allocator);
+    const q80_no_scale = try quantize(.q8_0, &no_scale, std.testing.allocator);
     defer std.testing.allocator.free(q80_no_scale[0]);
     try std.testing.expectEqual(q80_no_scale[0].len, 1);
 
@@ -594,7 +609,7 @@ pub fn dequantize(
         return error.Empty;
     }
 
-    if (format == .Float32) {
+    if (format == .f32) {
         return weights;
     }
 
@@ -607,15 +622,15 @@ pub fn dequantize(
     errdefer allocator.free(out);
 
     switch (format) {
-        .Q8_0 => dequantize_q8_0(weights, out),
+        .q8_0 => dequantize_q8_0(weights, out),
         else => @compileError("dequantize method is unimplemented for " ++ format),
     }
     return out;
 }
 
 // TODO: Vectorize this
-fn dequantize_q8_0(in: []const Block(.Q8_0), out: []f32) void {
-    const BlockType = Block(.Q8_0);
+fn dequantize_q8_0(in: []const Block(.q8_0), out: []f32) void {
+    const BlockType = Block(.q8_0);
     const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
     const block_size = array_info.len;
 
@@ -635,17 +650,17 @@ fn dequantize_q8_0(in: []const Block(.Q8_0), out: []f32) void {
 
 test "dequantize weights" {
     const empty = [0]f32{};
-    try std.testing.expectError(error.Empty, dequantize(.Float32, &empty, std.testing.allocator));
-    const empty_q80 = [0]Block(.Q8_0){};
-    try std.testing.expectError(error.Empty, dequantize(.Q8_0, &empty_q80, std.testing.allocator));
+    try std.testing.expectError(error.Empty, dequantize(.f32, &empty, std.testing.allocator));
+    const empty_q80 = [0]Block(.q8_0){};
+    try std.testing.expectError(error.Empty, dequantize(.q8_0, &empty_q80, std.testing.allocator));
 
     const no_scale = [_]f32{
         1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,  14,  15,  16,
         17, 31, 32, 33, 60, 63, 64, 65, 69, 70, 71, 72, 124, 125, 126, 127,
     };
 
-    const q80_no_scale = try quantize(.Q8_0, &no_scale, std.testing.allocator);
+    const q80_no_scale = try quantize(.q8_0, &no_scale, std.testing.allocator);
     defer std.testing.allocator.free(q80_no_scale[0]);
-    const out_dequantized = try dequantize(.Q8_0, q80_no_scale[0], std.testing.allocator);
+    const out_dequantized = try dequantize(.q8_0, q80_no_scale[0], std.testing.allocator);
     defer std.testing.allocator.free(out_dequantized);
 }

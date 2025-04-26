@@ -384,10 +384,10 @@ pub const GGUFFile = struct {
 
         // Alignment must be a u32
         const alignment = if (getMetadataValue(alignment_key, metadata)) |val|
-            switch (val.*) {
-                .uint32 => val.*.uint32,
+            switch (val) {
+                .uint32 => val.uint32,
                 else => {
-                    std.debug.print("\"{s}\" must be a uint32\n", .{alignment_key});
+                    std.debug.print("ggml: \"{s}\" must be a uint32\n", .{alignment_key});
                     return Error.Format;
                 },
             }
@@ -395,10 +395,10 @@ pub const GGUFFile = struct {
             32;
         // Quantization version must be a u32
         const quantization = if (getMetadataValue(quant_version_key, metadata)) |val|
-            switch (val.*) {
-                .uint32 => val.*.uint32,
+            switch (val) {
+                .uint32 => val.uint32,
                 else => {
-                    std.debug.print("\"{s}\" must be a uint32\n", .{quant_version_key});
+                    std.debug.print("ggml: \"{s}\" must be a uint32\n", .{quant_version_key});
                     return Error.Format;
                 },
             }
@@ -406,23 +406,23 @@ pub const GGUFFile = struct {
             0;
 
         const arch = if (getMetadataValue(arch_key, metadata)) |arch|
-            switch (arch.*) {
-                .string => arch.*.string.str,
+            switch (arch) {
+                .string => arch.string.str,
                 else => {
-                    std.debug.print("\"{s}\" must be a string\n", .{arch_key});
+                    std.debug.print("ggml: \"{s}\" must be a string\n", .{arch_key});
                     return Error.Format;
                 },
             }
         else {
-            std.debug.print("\"{s}\" is not present\n", .{arch_key});
+            std.debug.print("ggml: \"{s}\" is not present\n", .{arch_key});
             return Error.Format;
         };
 
         const name = if (getMetadataValue(name_key, metadata)) |name|
-            switch (name.*) {
-                .string => name.*.string.str,
+            switch (name) {
+                .string => name.string.str,
                 else => {
-                    std.debug.print("\"{s}\" must be a string\n", .{name_key});
+                    std.debug.print("ggml: \"{s}\" must be a string\n", .{name_key});
                     return Error.Format;
                 },
             }
@@ -482,18 +482,17 @@ pub const GGUFFile = struct {
         return ret.toOwnedSlice();
     }
 
-    fn getMetadataValue(key: []const u8, metadata: []MetadataKV) ?*const Value {
+    fn getMetadataValue(key: []const u8, metadata: []MetadataKV) ?Value {
         for (metadata) |kv| {
             if (std.mem.eql(u8, key, kv.key.str)) {
-                std.debug.print("", .{}); // Work around compiler bug for `-Doptimize=ReleaseXXX`
-                return &kv.value;
+                return kv.value;
             }
         }
         return null;
     }
 
     /// Get the Metadata value for a key if it is present or `null` otherwise.
-    pub fn getValue(self: *const Self, key: []const u8) ?*const Value {
+    pub fn getValue(self: *const Self, key: []const u8) ?Value {
         return getMetadataValue(key, self.metadata);
     }
 
@@ -517,8 +516,11 @@ pub const GGUFFile = struct {
         _ = self.arena.reset(.free_all);
         self.arena.deinit();
 
-        std.posix.munmap(self.mmap_ptr);
-        std.posix.close(self.fd);
+        if (self.fd != -1) {
+            std.posix.munmap(self.mmap_ptr);
+            std.posix.close(self.fd);
+        }
+        self.fd = -1;
     }
 
     /// Retrieve the `TensorInfo` with `name` if it exists, or `null` if not.

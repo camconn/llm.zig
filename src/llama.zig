@@ -1457,7 +1457,7 @@ pub const LlamaContext = struct {
         // No longer require a specific name, just print out and make a best effort attempt to make
         // sure the name has "Llama" in it.
         if (file.getValue(ggml.name_key)) |name| {
-            const inner = name.*.string.str;
+            const inner = name.string.str;
             if (std.ascii.indexOfIgnoreCase(inner, "llama") == null) {
                 std.debug.print("Model does not report as llama. Found name: {s}\n", .{inner});
                 return Error.BadFile;
@@ -1467,7 +1467,7 @@ pub const LlamaContext = struct {
         }
 
         if (file.getValue(ggml.arch_key)) |arch| {
-            const inner = arch.*.string.str;
+            const inner = arch.string.str;
             if (!std.mem.eql(u8, inner, "llama")) {
                 std.debug.print("{s} is wrong\n", .{inner});
                 return Error.BadFile;
@@ -1477,7 +1477,7 @@ pub const LlamaContext = struct {
         }
 
         if (file.getValue("tokenizer.ggml.model")) |tok_model| {
-            const model_name = tok_model.*.string.str;
+            const model_name = tok_model.string.str;
             if (!std.mem.eql(u8, model_name, "llama")) {
                 std.debug.print("Model reports to be {s} and not \"llama\"!\n", .{model_name});
                 return Error.BadFile;

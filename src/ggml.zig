@@ -171,9 +171,14 @@ pub const Value = union(MetadataType) {
 };
 
 // gguf_metadata_kv_t
+/// A entry for metadata within a model.
+///
+/// The `value_type` field is omitted because that info can be obtained by coercing the `Value`
+/// union to a `MetadataType` enum.
 pub const MetadataKV = struct {
+    /// The key for the metadata entry.
     key: String,
-    value_type: MetadataType,
+    /// The actual value for this entry.
     value: Value,
 
     fn read(reader: Reader, alloc: std.mem.Allocator) !MetadataKV {
@@ -182,7 +187,6 @@ pub const MetadataKV = struct {
         const value = try Value.read(value_type, reader, alloc);
         return .{
             .key = key,
-            .value_type = value_type,
             .value = value,
         };
     }
@@ -193,7 +197,6 @@ pub const GGUFHeader = struct {
     const magic_str = "GGUF"; // 0x47, 0x47, 0x55, 0x46
     const magic_num = std.mem.readInt(u32, magic_str, .little);
 
-    magic: u32,
     version: u32,
     tensor_count: u64,
     metadata_kv_count: u64,
@@ -214,7 +217,6 @@ pub const GGUFHeader = struct {
         const metadata_kv_count = try reader.readInt(u64, .little);
 
         return .{
-            .magic = magic,
             .version = version,
             .tensor_count = tensor_count,
             .metadata_kv_count = metadata_kv_count,
@@ -226,9 +228,17 @@ pub const GGUFHeader = struct {
 pub const TensorInfo = struct {
     const Self = @This();
 
+    /// The name of this the tensor.
     name: String,
-    dim: u32,
+    // omit `dim` because that's implicitly stored in the `dimensions` slice as its length
+    /// The dimensions of the tensor. The layout of the data within the dimensions varies
+    /// based on the actual model.
+    ///
+    /// For Llama (2), the dimensions are in `(x, y)` order where `x` is the number of columns and
+    /// `y` is the number of `rows`. Llama (2) weights are in row-major order, so the index of
+    /// an element at position `(a, b)` within a flattened tensor is at `b*len(row) + a`.
     dimensions: []u64,
+    /// The type of Tensor.
     ggml_type: Type,
     /// The relative offset of the tensor within the file, in bytes.
     /// This is a u64, but is represented as a usize to prevent a bunch of `@intCast` calls
@@ -249,7 +259,6 @@ pub const TensorInfo = struct {
 
         return .{
             .name = name,
-            .dim = dim,
             .dimensions = dimensions,
             .ggml_type = ggml_type,
             .offset = offset,
@@ -286,8 +295,8 @@ pub const TensorInfo = struct {
         const target = data_start + self.offset;
 
         var len: usize = 1;
-        for (0..self.dim) |i| {
-            len *= @intCast(self.dimensions[i]);
+        for (self.dimensions) |dim| {
+            len *= @intCast(dim);
         }
         std.debug.assert(len >= 1);
 
@@ -498,14 +507,15 @@ pub const GGUFFile = struct {
 
     pub fn dumpMetadata(self: *const Self) void {
         for (self.metadata) |kv| {
-            switch (kv.value_type) {
+            const value_type: MetadataType = kv;
+            switch (value_type) {
                 .string => std.debug.print("{s}={s}\n", .{ kv.key.str, kv.value.string.str }),
                 .uint32 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.uint32 }),
                 .uint64 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.uint64 }),
                 .float32 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.float32 }),
                 .float64 => std.debug.print("{s}={d}\n", .{ kv.key.str, kv.value.float64 }),
                 .array => std.debug.print("{s}=array {d} elem, {}\n", .{ kv.key.str, kv.value.array.len, kv.value.array.elem_type }),
-                else => std.debug.print("{s}={}\n", .{ kv.key.str, kv.value_type }),
+                else => std.debug.print("{s}={}\n", .{ kv.key.str, value_type }),
             }
         }
     }
@@ -546,17 +556,18 @@ pub fn main() !void {
 
     std.debug.print("Printing metadata\n", .{});
     for (file.metadata) |kv| {
-        switch (kv.value_type) {
+        const value_type: MetadataType = kv.value;
+        switch (value_type) {
             .uint32 => std.debug.print("{s}: u32 {d}\n", .{ kv.key.str, kv.value.uint32 }),
             .uint64 => std.debug.print("{s}: u64 {d}\n", .{ kv.key.str, kv.value.uint64 }),
             .string => std.debug.print("{s}: {s}\n", .{ kv.key.str, kv.value.string.str }),
-            else => std.debug.print("{s}: {}\n", .{ kv.key.str, kv.value_type }),
+            else => std.debug.print("{s}: {}\n", .{ kv.key.str, value_type }),
         }
     }
 
     std.debug.print("\nPrinting tensor info\n", .{});
     for (file.tensor_info) |tensor| {
-        std.debug.print("Got tensor {s} with dim {d} shape {any}\n", .{ tensor.name.str, tensor.dim, tensor.dimensions });
+        std.debug.print("Got tensor {s} with dim {d} shape {any}\n", .{ tensor.name.str, tensor.dimensions.len, tensor.dimensions });
     }
 
     std.debug.print("\n", .{});

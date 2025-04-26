@@ -1,6 +1,6 @@
 .{
     .name = .llm,
-    .version = "0.0.1",
+    .version = "0.0.2",
     .fingerprint = 0x44c7d218ed6d654a,
 
     // Tracks the earliest Zig version that the package considers to be a
@@ -23,5 +23,6 @@
         "build.zig.zon",
         "src",
         "README.md",
+        "LICENSE.txt",
     },
 }

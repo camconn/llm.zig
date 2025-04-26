@@ -8,7 +8,8 @@ const std = @import("std");
 
 const clap = @import("clap");
 
-const llama = @import("llama.zig");
+const llm = @import("llm");
+const llama = llm.llama;
 
 const print_perf = false;
 

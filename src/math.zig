@@ -373,3 +373,129 @@ test "dotProduct" {
     const y = [_]f32{ 14, 16, 10, 15, 16, 16, 1, 10, 13, 14, 13, 15 };
     try std.testing.expectEqual(1688, dotProduct(&x, &y));
 }
+
+/// Quantization of AI model weights.
+pub const WeightFormat = enum {
+    /// Uncompressed weights in `f32` form.
+    Float32,
+    /// 8 Bits per weight
+    Q8_0,
+};
+
+/// Get the type of a Quantized of weights for `format`.
+pub fn Block(format: WeightFormat) type {
+    return switch (format) {
+        .Float32 => f32,
+        // QK8_0 = 32 in the ggml reference
+        .Q8_0 => struct { f32, [32]i8 },
+    };
+}
+
+test "Block() size" {
+    const F32Block = Block(.Float32);
+    try std.testing.expectEqual(@sizeOf(f32), @sizeOf(F32Block));
+
+    const Q8_0Block = Block(.Q8_0);
+    try std.testing.expectEqual(@sizeOf(f32) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
+}
+
+/// Quantize weights `ws` from full-size `f32` to their quantized forms.
+/// Caller is responsible for freeing the returned Quantized block array.
+pub fn quantize(comptime format: WeightFormat, ws: []const f32, allocator: std.mem.Allocator) !struct { []const Block(format), f32 } {
+    if (ws.len == 0) {
+        return error.Empty;
+    }
+
+    // No conversion necessary
+    if (format == .Float32) {
+        return .{ ws, 0 };
+    }
+
+    const BlockType = Block(format);
+    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
+    const ArrayElem = array_info.child;
+    const block_size = array_info.len;
+    std.debug.assert(ws.len % block_size == 0);
+
+    const n_blocks = ws.len / block_size;
+    var blocks = try allocator.alloc(BlockType, n_blocks);
+    errdefer allocator.free(blocks);
+
+    const max_magnitude = struct {
+        pub fn lessThan(_: void, lhs: f32, rhs: f32) bool {
+            const a = @abs(lhs);
+            const b = @abs(rhs);
+            return a < b;
+        }
+    };
+
+    // Calculate max error
+    var err: f32 = 0;
+
+    // TODO: Vectorize this
+    for (0..n_blocks) |i| {
+        var blk: BlockType = undefined;
+        var items = blk[1];
+        const idx = i * block_size;
+
+        const elems: []const f32 = ws[idx .. idx + block_size];
+
+        const max: f32 = std.sort.max(f32, elems, {}, max_magnitude.lessThan) orelse 0;
+        const scale = max / 127.0;
+        blk[0] = scale;
+        // In the GGML reference the scale is inverted so that a cheaper multiply op can be
+        // used element-wise.
+        const inv_scale = if (scale == 0) 1 else 1 / scale; // ternary because divide-by-zero
+        std.debug.print("inv_scale: {d}\n", .{inv_scale});
+
+        for (0..block_size) |j| {
+            const old = elems[j];
+
+            const scaled = std.math.round(old * inv_scale);
+            std.debug.assert(scaled <= 127.0);
+            std.debug.assert(scaled >= -127.0);
+            // Ensure we are within 8 bits in a symmetric range.
+            const rounded = std.math.clamp(scaled, -127.0, 127.0);
+
+            // Save quantized weight
+            const quantized: ArrayElem = @intFromFloat(rounded);
+            items[j] = quantized;
+
+            // Calculate maximum error for diagnostics
+            const elem_err = @abs(@as(f32, @floatFromInt(quantized)) * inv_scale - old);
+            err = @max(err, elem_err);
+        }
+        blk[1] = items;
+        blocks[i] = blk;
+    }
+
+    return .{
+        blocks,
+        err,
+    };
+}
+
+test "quantize weights" {
+    const empty: [0]f32 = [0]f32{};
+    try std.testing.expectError(error.Empty, quantize(.Float32, &empty, std.testing.allocator));
+
+    const f32s = [_]f32{ 1, 2, 3, 4, 5 };
+    const f32_quant = try quantize(.Float32, &f32s, std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &f32s, f32_quant[0]);
+    try std.testing.expectEqual(0, f32_quant[1]);
+
+    const no_scale = [_]f32{
+        1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,  14,  15,  16,
+        17, 31, 32, 33, 60, 63, 64, 65, 69, 70, 71, 72, 124, 125, 126, 127,
+    };
+
+    const q80_no_scale = try quantize(.Q8_0, &no_scale, std.testing.allocator);
+    defer std.testing.allocator.free(q80_no_scale[0]);
+    try std.testing.expectEqual(q80_no_scale[0].len, 1);
+
+    const no_scale_exp = [32]i8{
+        1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,  14,  15,  16,
+        17, 31, 32, 33, 60, 63, 64, 65, 69, 70, 71, 72, 124, 125, 126, 127,
+    };
+    try std.testing.expectEqualSlices(i8, &no_scale_exp, &q80_no_scale[0][0][1]);
+}

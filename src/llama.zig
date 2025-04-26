@@ -1194,11 +1194,11 @@ pub const TransformerV1 = struct {
 
             // Now handle attention matrix multiplies
             // xq = wq(x)
-            math.matrixMul(state.q, layer.wq, state.work, dim, dim);
+            math.matrixMul(f32, state.q, layer.wq, state.work, dim, dim);
             // xk = wk(x)
-            math.matrixMul(state.k, layer.wk, state.work, kv_dim, dim);
+            math.matrixMul(f32, state.k, layer.wk, state.work, kv_dim, dim);
             // xv = wv(x)
-            math.matrixMul(state.v, layer.wv, state.work, kv_dim, dim);
+            math.matrixMul(f32, state.v, layer.wv, state.work, kv_dim, dim);
 
             // RoPE
             //     xq, xk = apply_rotary_emb(xq, xk, freq_cs, freq_ss)
@@ -1227,7 +1227,7 @@ pub const TransformerV1 = struct {
             //     return wo(output)
             const attention_preout = state.work[0..];
 
-            math.matrixMul(state.work2[0..dim], layer.wo, attention_preout, dim, dim);
+            math.matrixMul(f32, state.work2[0..dim], layer.wo, attention_preout, dim, dim);
             // End of Attention.forward(x);
 
             // We are back in TransformerBlock.forward(x, freq_cs, freq_ss). We just need to add
@@ -1237,7 +1237,7 @@ pub const TransformerV1 = struct {
             //     h = x + self.attention.forward(self.attention_norm(x), freqs_cs, freqs_ss)
             //     out = h + self.feed_forward.forward(self.ffn_norm(h))
 
-            math.add(state.input, state.input, state.work2);
+            math.add(f32, state.input, state.input, state.work2);
             // We are no longer using the input `x` and can now use it as `h`.
 
             // Calculate ff = self.ffn_norm(h) = RMSNorm(h, feed_forward)
@@ -1247,22 +1247,22 @@ pub const TransformerV1 = struct {
             //     return w2( silu(w1(x)) * w3(x) )
 
             // hid1 = w1(x)
-            math.matrixMul(state.hidden1, layer.w1, state.work, c.hidden_dim, dim);
+            math.matrixMul(f32, state.hidden1, layer.w1, state.work, c.hidden_dim, dim);
             // hid2 = w3(x)
-            math.matrixMul(state.hidden2, layer.w3, state.work, c.hidden_dim, dim);
+            math.matrixMul(f32, state.hidden2, layer.w3, state.work, c.hidden_dim, dim);
 
             // Calculate SwiGLU
             math.swiglu(state.hidden1);
             math.elementProduct(state.hidden1, state.hidden1, state.hidden2);
 
             // w2 * (swiglu(w2(x)) * w3(x))
-            math.matrixMul(state.work, layer.w2, state.hidden1, dim, c.hidden_dim);
+            math.matrixMul(f32, state.work, layer.w2, state.hidden1, dim, c.hidden_dim);
             // Done with FeedForward.forward(x)
 
             // Add back `h` to result of FeedForward.forward(x)
             //     out = h + feed_foward.forward(ffn_norm(h))
             //     return out
-            math.add(state.input, state.input, state.work);
+            math.add(f32, state.input, state.input, state.work);
 
             // Done with TransformerBlock.forward();
             //std.debug.print("Done with layer {d}/{d} with {d} at {d}\n", .{ i, c.n_layers, token, n_token });
@@ -1281,7 +1281,7 @@ pub const TransformerV1 = struct {
 
         // We are doing inference only, so no calculation of cross-entropy is needed
         // Logits are found by feeding `h` (state.input) through a linear layer.
-        math.matrixMul(state.output, self.classifier, state.input, c.vocab_size, dim);
+        math.matrixMul(f32, state.output, self.classifier, state.input, c.vocab_size, dim);
 
         ending.completeOne();
         ending.end();

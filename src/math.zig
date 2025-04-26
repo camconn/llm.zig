@@ -8,17 +8,51 @@
 
 const std = @import("std");
 
-/// Vector item for non-quantized Neural Networks.
-const Elem = f32;
-/// Default vector length for non-quantized networks.
-const vector_len = std.simd.suggestVectorLength(Elem) orelse 8;
-/// Floating point Vector type for non-quantized math.
-const Vec = @Vector(vector_len, Elem);
-
 /// Create a custom vector definition for an arbitrary type `T`.
 fn Vect(comptime T: type) type {
-    const len = std.simd.suggestVectorLength(T) orelse 8;
+    const len = comptime std.simd.suggestVectorLength(T) orelse 8;
     return @Vector(len, T);
+}
+
+/// Helper method to get the length of a vector from `Vect`
+fn vectLen(comptime T: type) usize {
+    if (@typeInfo(T) != .vector) {
+        @compileError("You can only call this on Vector types");
+    }
+    return @typeInfo(T).vector.len;
+}
+
+/// Helper method to get the child elements of a vector type from `Vect`.
+fn VectElem(comptime T: type) type {
+    return @typeInfo(T).vector.child;
+}
+
+test "Vect setup" {
+    // TODO: This is is kind of brittle and may break when compiling for different architectures
+    //       other than x86_64.
+
+    // We don't necessarily know the vector size on the target machine, so just find a basic
+    // vector length and then extrapolate based on relative size of the element.
+    const m = std.simd.suggestVectorLength(f32) orelse 8;
+    const args = [_]struct { type, type, usize, type }{
+        .{ f32, @Vector(m, f32), m, f32 },
+        .{ f16, @Vector(m * 2, f16), m * 2, f16 },
+        .{ i32, @Vector(m, i32), m, i32 },
+        .{ i16, @Vector(m * 2, i16), m * 2, i16 },
+        .{ i8, @Vector(m * 4, i8), m * 4, i8 },
+    };
+
+    // use `comptime` to force unroll because we are calculating types
+    comptime for (args) |a| {
+        const T, const Expected, const len_expected, const child_expected = a;
+        const Vec = Vect(T);
+        const len = vectLen(Vec);
+        const child = VectElem(Vec);
+
+        try std.testing.expectEqual(Expected, Vec);
+        try std.testing.expectEqual(len_expected, len);
+        try std.testing.expectEqual(child_expected, child);
+    };
 }
 
 /// Quantization types for model weights.
@@ -68,6 +102,9 @@ pub fn rmsNorm(out: []f32, x: []const f32, y: []const f32) void {
         std.debug.assert(x.len == y.len);
         @panic("Mismatched lengths");
     }
+
+    const Vec = comptime Vect(f32);
+    const vector_len = comptime vectLen(Vec);
 
     const chunks = x.len / vector_len;
     const leftover_offset = chunks * vector_len;
@@ -176,6 +213,9 @@ test "softMax" {
 
 /// Calculate swiglu(x) and store that back into x.
 pub fn swiglu(x: []f32) void {
+    const Vec = comptime Vect(f32);
+    const vector_len = comptime vectLen(Vec);
+
     const chunks = x.len / vector_len;
     const leftover_offset = chunks * vector_len;
 
@@ -234,9 +274,13 @@ test "swiglu" {
 
 /// Add `x` and `y` then store into `out`.
 /// Caller is responsible for ensuring the lengths of `x`, `y`, and `out` are the same.
-pub fn add(out: []f32, x: []const f32, y: []const f32) void {
+pub fn add(comptime T: type, out: []T, x: []const T, y: []const T) void {
     std.debug.assert(x.len == y.len);
     std.debug.assert(x.len == out.len);
+
+    const Vec = comptime Vect(T);
+    const vector_len = comptime vectLen(Vec);
+
     const chunks = x.len / vector_len;
     const leftover_offset = chunks * vector_len;
 
@@ -262,7 +306,7 @@ test "add" {
     const b = [_]f32{ 4, 5, 6 };
     var out = [_]f32{ 0, 0, 0 };
 
-    add(&out, &a, &b);
+    add(f32, &out, &a, &b);
     try std.testing.expectEqualDeep([_]f32{ 5, 7, 9 }, out);
 }
 
@@ -271,6 +315,10 @@ test "add" {
 pub fn elementProduct(out: []f32, x: []const f32, y: []const f32) void {
     std.debug.assert(x.len == y.len);
     std.debug.assert(x.len == out.len);
+
+    const Vec = comptime Vect(f32);
+    const vector_len = comptime vectLen(Vec);
+
     const chunks = x.len / vector_len;
     const leftover_offset = chunks * vector_len;
 
@@ -292,7 +340,7 @@ pub fn elementProduct(out: []f32, x: []const f32, y: []const f32) void {
 }
 
 /// Multiply a matrix `m` of (`rows`, `cols`) by a vector `x` of (`cols`) and store in `out`.
-pub fn matrixMul(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: usize) void {
+pub fn matrixMul(comptime T: type, out: []T, m: []const T, x: []const T, rows: usize, cols: usize) void {
     // zig fmt: off
     //std.debug.print("out: {d}, m: {d}, x: {d}, rows: {d}, cols: {d}\n",
     //                .{ out.len, m.len, x.len, rows, cols });
@@ -300,6 +348,9 @@ pub fn matrixMul(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: 
     std.debug.assert(out.len == rows);
     std.debug.assert(x.len == cols);
     std.debug.assert(m.len == rows * cols);
+
+    const Vec = comptime Vect(T);
+    const vector_len = comptime vectLen(Vec);
 
     const chunks = x.len / vector_len;
     const leftover_offset = chunks * vector_len;
@@ -325,21 +376,22 @@ pub fn matrixMul(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: 
             sum += xs * ms;
         }
 
+        // TODO: Check if we need to convert from `sum` back to an integer per `T`.
         out[row] = sum;
     }
 }
 
-test "matrixMul" {
+test "matrixMul f32" {
     const a = [_]f32{ 1, 2, 3, 4, 5, 6 };
     const b = [_]f32{ 1, 2, 5 };
     var out2 = [_]f32{0} ** 2;
 
-    matrixMul(&out2, &a, &b, 2, 3);
+    matrixMul(f32, &out2, &a, &b, 2, 3);
     try std.testing.expectEqualDeep([_]f32{ 20, 44 }, out2);
 
     const d = [_]f32{ 4, -1 };
     var out3 = [_]f32{0} ** 3;
-    matrixMul(&out3, &a, &d, 3, 2);
+    matrixMul(f32, &out3, &a, &d, 3, 2);
     try std.testing.expectEqualDeep([_]f32{ 2, 8, 14 }, out3);
 
     const m = [_]f32{
@@ -363,14 +415,14 @@ test "matrixMul" {
     const expect5 = [_]f32{
         2855, 4581, 4242, 5244, 5014,
     };
-    matrixMul(&out5, &m, &x, 5, 12);
+    matrixMul(f32, &out5, &m, &x, 5, 12);
     try std.testing.expectEqualDeep(expect5, out5);
 
     var out12 = [_]f32{0} ** 12;
     const expect12 = [_]f32{
         2953, 888, 2203, 3501, 4717, 2083, 3491, 3781, 2697, 2964, 2714, 2259,
     };
-    matrixMul(&out12, &m, &z, 12, 5);
+    matrixMul(f32, &out12, &m, &z, 12, 5);
     try std.testing.expectEqualDeep(expect12, out12);
 }
 
@@ -381,6 +433,9 @@ pub fn dotProduct(x: []const f32, y: []const f32) f32 {
         std.debug.print("x.len {d} != y.len {d}\n", .{ x.len, y.len });
     }
     std.debug.assert(x.len == y.len);
+
+    const Vec = comptime Vect(f32);
+    const vector_len = comptime vectLen(Vec);
 
     const chunks = x.len / vector_len;
     const leftover_offset = chunks * vector_len;

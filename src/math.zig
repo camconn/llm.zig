@@ -401,7 +401,11 @@ test "Block() size" {
 
 /// Quantize weights `ws` from full-size `f32` to their quantized forms.
 /// Caller is responsible for freeing the returned Quantized block array.
-pub fn quantize(comptime format: WeightFormat, ws: []const f32, allocator: std.mem.Allocator) !struct { []const Block(format), f32 } {
+pub fn quantize(
+    comptime format: WeightFormat,
+    ws: []const f32,
+    allocator: std.mem.Allocator,
+) !struct { []const Block(format), f32 } {
     if (ws.len == 0) {
         return error.Empty;
     }
@@ -413,32 +417,48 @@ pub fn quantize(comptime format: WeightFormat, ws: []const f32, allocator: std.m
 
     const BlockType = Block(format);
     const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
-    const ArrayElem = array_info.child;
     const block_size = array_info.len;
     std.debug.assert(ws.len % block_size == 0);
 
     const n_blocks = ws.len / block_size;
-    var blocks = try allocator.alloc(BlockType, n_blocks);
+    const blocks = try allocator.alloc(BlockType, n_blocks);
     errdefer allocator.free(blocks);
 
-    const max_magnitude = struct {
-        pub fn lessThan(_: void, lhs: f32, rhs: f32) bool {
-            const a = @abs(lhs);
-            const b = @abs(rhs);
-            return a < b;
-        }
+    const err = switch (format) {
+        .Q8_0 => quantize_q8_0(ws, blocks),
+        else => @compileError("quantize method is unimplemented for " ++ format),
     };
 
+    return .{
+        blocks,
+        err,
+    };
+}
+
+const max_magnitude = struct {
+    pub fn lessThan(_: void, lhs: f32, rhs: f32) bool {
+        const a = @abs(lhs);
+        const b = @abs(rhs);
+        return a < b;
+    }
+};
+
+// TODO: Vectorize this
+fn quantize_q8_0(in: []const f32, blocks: []Block(.Q8_0)) f32 {
     // Calculate max error
     var err: f32 = 0;
+    const n_blocks = blocks.len;
+    const BlockType = Block(.Q8_0);
+    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
+    const ArrayElem = array_info.child;
+    const block_size = array_info.len;
 
-    // TODO: Vectorize this
     for (0..n_blocks) |i| {
         var blk: BlockType = undefined;
         var items = blk[1];
         const idx = i * block_size;
 
-        const elems: []const f32 = ws[idx .. idx + block_size];
+        const elems: []const f32 = in[idx .. idx + block_size];
 
         const max: f32 = std.sort.max(f32, elems, {}, max_magnitude.lessThan) orelse 0;
         const scale = max / 127.0;
@@ -467,11 +487,7 @@ pub fn quantize(comptime format: WeightFormat, ws: []const f32, allocator: std.m
         blk[1] = items;
         blocks[i] = blk;
     }
-
-    return .{
-        blocks,
-        err,
-    };
+    return err;
 }
 
 test "quantize weights" {
@@ -500,8 +516,12 @@ test "quantize weights" {
     try std.testing.expectEqual(0, q80_no_scale[1]);
 }
 
-/// Dequantize weights
-pub fn dequantize(comptime format: WeightFormat, weights: []const Block(format), allocator: std.mem.Allocator) ![]const f32 {
+/// De-quantize weights
+pub fn dequantize(
+    comptime format: WeightFormat,
+    weights: []const Block(format),
+    allocator: std.mem.Allocator,
+) ![]const f32 {
     if (weights.len == 0) {
         return error.Empty;
     }
@@ -515,11 +535,24 @@ pub fn dequantize(comptime format: WeightFormat, weights: []const Block(format),
     const block_size = array_info.len;
 
     const n_out = weights.len * block_size;
-    var out = try allocator.alloc(f32, n_out);
+    const out = try allocator.alloc(f32, n_out);
     errdefer allocator.free(out);
 
-    for (0..weights.len) |i| {
-        const block = weights[i];
+    switch (format) {
+        .Q8_0 => dequantize_q8_0(weights, out),
+        else => @compileError("dequantize method is unimplemented for " ++ format),
+    }
+    return out;
+}
+
+// TODO: Vectorize this
+fn dequantize_q8_0(in: []const Block(.Q8_0), out: []f32) void {
+    const BlockType = Block(.Q8_0);
+    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
+    const block_size = array_info.len;
+
+    for (0..in.len) |i| {
+        const block = in[i];
 
         const idx = block_size * i;
 
@@ -530,7 +563,6 @@ pub fn dequantize(comptime format: WeightFormat, weights: []const Block(format),
             out[idx + j] = elem_f * scale;
         }
     }
-    return out;
 }
 
 test "dequantize weights" {

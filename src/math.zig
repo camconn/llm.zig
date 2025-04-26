@@ -5,7 +5,6 @@
 // © 2025 Cameron Conn
 
 //! Math: This module contains math and other helper functions for neural networks.
-//!
 
 const std = @import("std");
 
@@ -15,6 +14,45 @@ pub const Elem = f32;
 pub const vector_len = std.simd.suggestVectorLength(Elem) orelse 8;
 /// Floating point Vector type for non-quantized math.
 pub const Vec = @Vector(vector_len, Elem);
+
+/// Create a custom vector definition for an arbitrary type `T`.
+fn Vect(comptime T: type) type {
+    const len = std.simd.suggestVectorLength(T) orelse 8;
+    return @Vector(len, T);
+}
+
+/// Quantization types for model weights.
+pub const WeightFormat = enum {
+    /// Uncompressed weights in `f32` form.
+    /// This is not actually a quantization, but a pseudo-type for internal purposes.
+    Float32,
+    /// Represents 8 bit weights scaled by a single precision float `d` for every 32 weights.
+    /// The original weight `w = i * d` where `i` is the quantized integer and `d` is the scale.
+    Q8_0,
+};
+
+const Q80Block = extern struct {
+    scale: f32,
+    // QK8_0 = 32 in the ggml reference
+    weights: [32]i8,
+};
+
+/// Represents the native on-disk and in-memory structure
+pub fn Block(format: WeightFormat) type {
+    return switch (format) {
+        .Float32 => f32,
+        .Q8_0 => Q80Block,
+    };
+}
+
+test "Block() size" {
+    const F32Block = Block(.Float32);
+    try std.testing.expectEqual(@sizeOf(f32), @sizeOf(F32Block));
+
+    // Ensure Q8_0 compatibility when reading from a GGUF file.
+    const Q8_0Block = Block(.Q8_0);
+    try std.testing.expectEqual(@sizeOf(f32) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
+}
 
 /// Perform RMS Normalization on `x` with the weights `y` and store the result in `out`.
 /// Requires all inputs to have the same length.
@@ -374,34 +412,6 @@ test "dotProduct" {
     try std.testing.expectEqual(1688, dotProduct(&x, &y));
 }
 
-/// Quantization types for AI model weights.
-pub const WeightFormat = enum {
-    /// Uncompressed weights in `f32` form.
-    /// This is not actually a quantization, but a pseudo-type for internal purposes.
-    Float32,
-    /// Represents 8 bit weights scaled by a single precision float `d` for every 32 weights.
-    /// The original weight `w = i * d` where `i` is the quantized integer and `d` is the scale.
-    Q8_0,
-};
-
-/// Get the type of a Quantized of weights for `format`.
-pub fn Block(format: WeightFormat) type {
-    return switch (format) {
-        .Float32 => f32,
-        // QK8_0 = 32 in the ggml reference
-        .Q8_0 => struct { f32, [32]i8 },
-    };
-}
-
-test "Block() size" {
-    const F32Block = Block(.Float32);
-    try std.testing.expectEqual(@sizeOf(f32), @sizeOf(F32Block));
-
-    // Ensure Q8_0 compatibility when reading from a GGUF file.
-    const Q8_0Block = Block(.Q8_0);
-    try std.testing.expectEqual(@sizeOf(f32) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
-}
-
 /// Quantize weights `ws` from full-size `f32` to their quantized forms.
 /// Caller is responsible for freeing the returned Quantized block array.
 pub fn quantize(
@@ -419,7 +429,7 @@ pub fn quantize(
     }
 
     const BlockType = Block(format);
-    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
+    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
     const block_size = array_info.len;
     std.debug.assert(ws.len % block_size == 0);
 
@@ -452,20 +462,20 @@ fn quantize_q8_0(in: []const f32, blocks: []Block(.Q8_0)) f32 {
     var err: f32 = 0;
     const n_blocks = blocks.len;
     const BlockType = Block(.Q8_0);
-    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
+    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
     const ArrayElem = array_info.child;
     const block_size = array_info.len;
 
     for (0..n_blocks) |i| {
         var blk: BlockType = undefined;
-        var items = blk[1];
+        var items = blk.weights;
         const idx = i * block_size;
 
         const elems: []const f32 = in[idx .. idx + block_size];
 
         const max: f32 = std.sort.max(f32, elems, {}, max_magnitude.lessThan) orelse 0;
         const scale = max / 127.0;
-        blk[0] = scale;
+        blk.scale = scale;
         // In the GGML reference the scale is inverted so that a cheaper multiply op can be
         // used element-wise.
         const inv_scale = if (scale == 0) 1 else 1 / scale; // ternary because divide-by-zero
@@ -487,7 +497,7 @@ fn quantize_q8_0(in: []const f32, blocks: []Block(.Q8_0)) f32 {
             const elem_err = @abs(@as(f32, @floatFromInt(quantized)) * inv_scale - old);
             err = @max(err, elem_err);
         }
-        blk[1] = items;
+        blk.weights = items;
         blocks[i] = blk;
     }
     return err;
@@ -515,7 +525,7 @@ test "quantize weights" {
         1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,  14,  15,  16,
         17, 31, 32, 33, 60, 63, 64, 65, 69, 70, 71, 72, 124, 125, 126, 127,
     };
-    try std.testing.expectEqualSlices(i8, &no_scale_exp, &q80_no_scale[0][0][1]);
+    try std.testing.expectEqualSlices(i8, &no_scale_exp, &q80_no_scale[0][0].weights);
     try std.testing.expectEqual(0, q80_no_scale[1]);
 }
 
@@ -534,7 +544,7 @@ pub fn dequantize(
     }
 
     const BlockType = Block(format);
-    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
+    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
     const block_size = array_info.len;
 
     const n_out = weights.len * block_size;
@@ -551,7 +561,7 @@ pub fn dequantize(
 // TODO: Vectorize this
 fn dequantize_q8_0(in: []const Block(.Q8_0), out: []f32) void {
     const BlockType = Block(.Q8_0);
-    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .@"1").type).array;
+    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
     const block_size = array_info.len;
 
     for (0..in.len) |i| {
@@ -559,9 +569,9 @@ fn dequantize_q8_0(in: []const Block(.Q8_0), out: []f32) void {
 
         const idx = block_size * i;
 
-        const scale = block[0];
+        const scale = block.scale;
         for (0..block_size) |j| {
-            const elem = block[1][j];
+            const elem = block.weights[j];
             const elem_f: f32 = @floatFromInt(elem);
             out[idx + j] = elem_f * scale;
         }

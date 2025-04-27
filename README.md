@@ -10,6 +10,8 @@ like [zig-clap](https://github.com/Hejsil/zig-clap) are used, but only for
 non-AI code like parsing CLI arguments.
 
 ## Implemented
+- GGML
+    - Loading FP32 quantization is supported for all models with `.gguf` files.
 - LLaMA 2
     - SentencePiece-like tokenization
     - Key-Value caching
@@ -24,11 +26,42 @@ Things this library doesn't do:
 In the future other architectures such as mingpt, nanogpt, LLaMA3, etc. may be added.
 
 # Setup
-Models need their weights setup in a proper format to run.
+
+A full set of options for running `llm.zig` can be viewed by running the executable with the
+`--help` flag:
+
+```
+$ zig build run -- --help
+```
+or
+```
+$ zig build
+$ ./zig-out/bin/llm_zig --help
+```
+
+To acutally do inference, you will need to download models in the appropriate
+format. Instructions for generating supported files are shown below.
 
 ## LLaMA
-How to setup LLaMA 2 inference:
+How to setup LLaMA 2 inference
 
+### GGUF Weights
+Obtain a set of `.gguf` weights from somewhere with teh `float32` or `fp32` quantization.
+
+Then, run the model like so:
+
+```
+$ zig build run -Doptimize=ReleaseSafe -- --model path/to/llama2/weights-7b-f32.ggml
+```
+
+Or, you can add the `--format` argument to manually specify ggml:
+```
+$ zig build run -Doptimize=ReleaseSafe -- --format ggml --model path/to/llama2/weights-7b-f32.ggml
+```
+
+
+
+### llama2.c weights
 1. Download the LLaMA 2 (full fp32 weights) weights.
 2. Export the weights using the [llama2.c](https://github.com/karpathy/llama2.c) `export.py` script for version 1:
 ```
@@ -42,7 +75,7 @@ $ python3 tokenizer.py --tokenizer-model=/path/to/llama2/tokenizer.model
 ```
 4. Build the code and run with `zig build run -Doptimize=ReleaseSafe --`
 ```
-$ zig build run -Doptimize=ReleaseSafe -- --prompt='Zebras are primarily grazers and can subsist on lower-quality vegetation. They are preyed on mainly by'
+$ zig build run -Doptimize=ReleaseSafe -- --format llama2.c --prompt='Zebras are primarily grazers and can subsist on lower-quality vegetation. They are preyed on mainly by'
 ```
 
 # Licensing

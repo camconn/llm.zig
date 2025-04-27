@@ -67,7 +67,7 @@ $ zig build run -Doptimize=ReleaseSafe -- --format ggml --model path/to/llama2/w
 ```
 $ python3 export.py --version 1 --meta-llama /path/to/llama-2-7b/ llama2-7b.bin
 ```
-3. Export download a copy of
+3. Download a copy of
 [`tokenizer.bin`](https://github.com/karpathy/llama2.c/blob/master/tokenizer.bin)
 or export a copy yourself using the script from `llama2.c`:
 ```
@@ -75,7 +75,8 @@ $ python3 tokenizer.py --tokenizer-model=/path/to/llama2/tokenizer.model
 ```
 4. Build the code and run with `zig build run -Doptimize=ReleaseSafe --`
 ```
-$ zig build run -Doptimize=ReleaseSafe -- --format llama2.c --prompt='Zebras are primarily grazers and can subsist on lower-quality vegetation. They are preyed on mainly by'
+$ zig build run -Doptimize=ReleaseSafe -- --format llama2.c --tokenizer
+tokenizer.bin --prompt='Zebras are primarily grazers and can subsist on lower-quality vegetation. They are preyed on mainly by'
 ```
 
 # Licensing

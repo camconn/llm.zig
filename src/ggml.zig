@@ -276,7 +276,11 @@ pub const TensorInfo = struct {
     /// within model code.
     offset: usize,
 
-    fn read(reader: Reader, alloc: std.mem.Allocator) Error!TensorInfo {
+    inline fn alignOffset(offset: usize, alignment: usize) usize {
+        return offset + (alignment - (offset % alignment)) % alignment;
+    }
+
+    fn read(reader: Reader, alignment: usize, alloc: std.mem.Allocator) Error!TensorInfo {
         const name = try (String.read(reader, alloc) catch Error.EOF);
         const dim = try (reader.readInt(u32, .little) catch Error.EOF);
         std.debug.assert(dim > 0);
@@ -288,6 +292,28 @@ pub const TensorInfo = struct {
         const ggml_type = try (reader.readEnum(Type, .little) catch Error.EOF);
         const offset: usize = @intCast(try (reader.readInt(u64, .little) catch Error.EOF));
 
+        const aligned = alignOffset(offset, alignment);
+        if (offset != aligned) {
+            std.debug.print("Unaligned: {s} offset {d} align {d} alignOffset {d}", .{
+                name.str,
+                offset,
+                alignment,
+                aligned,
+            });
+            return Error.FileError;
+        }
+
+        const rem = offset % alignment;
+        if (rem != 0) {
+            std.debug.print("Tensor {s} is not aligned: offset {d} alignment {d} has remainder {d}\n", .{
+                name.str,
+                offset,
+                alignment,
+                rem,
+            });
+            return Error.FileError;
+        }
+
         return .{
             .name = name,
             .dimensions = dimensions,
@@ -296,31 +322,11 @@ pub const TensorInfo = struct {
         };
     }
 
-    /// Get the element type of this
-    pub fn getElemType(self: Self) type {
-        return switch (self.ggml_type) {
-            .U8 => u8,
-            .I8 => i8,
-            .U16 => u16,
-            .I16 => i16,
-            .U32 => u32,
-            .I32 => i32,
-            .F32 => f32,
-            .U64 => u32,
-            .I64 => i32,
-            .F64 => f64,
-
-            else => {
-                std.debug.print("Unimplemented type: {}\n", .{self.ggml_type});
-                @panic("Unimplemented type");
-            },
-        };
-    }
-
     /// Get a raw slice of the Tensor's data in native model order.
     /// Get the elements of this tensor from the files `mmap(2)` pointer.
-    pub fn getElems(self: Self, data_start: usize) math.Weights {
-        const target = data_start + self.offset;
+    pub fn getElems(self: Self, tensor_data: [*]const u8) math.Weights {
+        const tensor = tensor_data[self.offset..];
+        const target = @intFromPtr(&tensor[0]);
 
         var len: usize = 1;
         for (self.dimensions) |dim| {
@@ -334,15 +340,13 @@ pub const TensorInfo = struct {
                 return .{ .f32 = ptr[0..len] };
             },
             .Q8_0 => {
-                const Block = math.Block(.q8_0);
-                const ptr: [*]Block = @ptrFromInt(target);
-                const block_len = @typeInfo(@FieldType(Block, "weights")).array.len;
-                // Verify that the length divides cleanly into the number of blocks.
-                const rem = @rem(len, block_len);
-                std.debug.assert(rem == 0);
+                const Block = comptime math.Block(.q8_0);
+                const block_len = comptime math.blockUnitLen(Block);
+                std.debug.assert(len % block_len == 0);
+                const blocks = len / block_len;
 
-                const num_blocks = len / block_len;
-                return .{ .q8_0 = ptr[0..num_blocks] };
+                const ptr: [*]Block = @ptrFromInt(target);
+                return .{ .q8_0 = ptr[0..blocks] };
             },
             else => {
                 std.debug.print("ggml: Unsupported quantization, this is a library bug {}\n", .{self.ggml_type});
@@ -370,6 +374,9 @@ pub const GGUFFile = struct {
 
     // padding
     // padding ends at sizeof(GGUFHeader) + sizeof(tensor_infos)
+    /// How many bytes from the beginning of the file tensor data starts at.
+    /// This is not an `mmap(2)` pointer, but the offset within the file, so you will manually
+    /// need to add this to the `mmap(2)` ptr.
     tensor_data_offset: usize,
     //tensor_data: anyopaque,
 
@@ -380,6 +387,7 @@ pub const GGUFFile = struct {
 
     fd: std.posix.fd_t,
     mmap_ptr: []align(page_size) u8,
+    file_size: usize,
 
     const Self = @This();
 
@@ -436,8 +444,6 @@ pub const GGUFFile = struct {
         const header = try GGUFHeader.read(reader);
         // read metadata
         const metadata = try read_metadata(header.metadata_kv_count, reader, allocator);
-        // Read tensor info
-        const tensor_info = try read_tensor_info(header.tensor_count, reader, allocator);
 
         // Alignment must be a u32
         const alignment = if (getMetadataValue(alignment_key, metadata)) |val|
@@ -450,6 +456,9 @@ pub const GGUFFile = struct {
             }
         else
             32;
+        // Read tensor info
+        const tensor_info = try read_tensor_info(header.tensor_count, @intCast(alignment), reader, allocator);
+
         // Quantization version must be a u32
         const quantization = if (getMetadataValue(quant_version_key, metadata)) |val|
             switch (val) {
@@ -505,11 +514,12 @@ pub const GGUFFile = struct {
         std.debug.print("Model name: {s}\n", .{name});
         std.debug.print("desired alignment: {d}; quantization: {d}\n", .{ alignment, quantization });
 
-        const offset: usize = @intCast(try reader.context.getPos());
-        std.debug.print("Current file offset is {d}\n", .{offset});
+        const file_offset: usize = @intCast(try reader.context.getPos());
+        const aligned = std.mem.alignForward(usize, file_offset, alignment);
+        std.debug.print("Aligning from {d} to {d}\n", .{ file_offset, aligned });
 
-        const tensor_data_offset = std.mem.alignForward(usize, offset + @intFromPtr(ptr.ptr), @intCast(alignment));
-        std.debug.print("Tensor_data starts at {d}\n", .{tensor_data_offset});
+        const tensor_data_offset = aligned;
+        //std.debug.print("Tensor_data starts at addr {d}, offset {d}\n", .{ tensor_data_offset, aligned });
 
         return .{
             // gguf fields
@@ -521,6 +531,7 @@ pub const GGUFFile = struct {
             // housekeeping fields
             .fd = fd,
             .mmap_ptr = ptr,
+            .file_size = fsize,
 
             .arena = arena,
         };
@@ -542,13 +553,13 @@ pub const GGUFFile = struct {
         return ret.toOwnedSlice();
     }
 
-    fn read_tensor_info(count: u64, reader: Reader, alloc: std.mem.Allocator) ![]TensorInfo {
+    fn read_tensor_info(count: u64, alignment: usize, reader: Reader, alloc: std.mem.Allocator) ![]TensorInfo {
         var ret = std.ArrayList(TensorInfo).init(alloc);
         errdefer ret.deinit();
         try ret.ensureTotalCapacityPrecise(count);
 
         for (0..count) |_| {
-            const tensor = try TensorInfo.read(reader, alloc);
+            const tensor = try TensorInfo.read(reader, alignment, alloc);
             try ret.append(tensor);
         }
         return ret.toOwnedSlice();
@@ -606,6 +617,16 @@ pub const GGUFFile = struct {
         return null;
     }
 
+    /// Retrieve the `TensorWeights` for `name` if it exists or `null` otherwise.
+    pub fn getTensorWeights(self: Self, name: []const u8) ?math.Weights {
+        if (self.getTensorInfo(name)) |info| {
+            const tensor_data = self.mmap_ptr[self.tensor_data_offset..];
+            const tensor_data_ptr = tensor_data.ptr;
+            return info.getElems(tensor_data_ptr);
+        }
+        return null;
+    }
+
     /// Retrieve the declared file type of this GGUF file.
     /// Returns `null` if there is no declared file type, or the value is invalid.
     pub fn fileType(self: Self) ?FileType {
@@ -649,7 +670,14 @@ pub fn main() !void {
 
     std.debug.print("\nPrinting tensor info\n", .{});
     for (file.tensor_info) |tensor| {
-        std.debug.print("Got tensor {s} with dim {d} shape {any} ({})\n", .{ tensor.name.str, tensor.dimensions.len, tensor.dimensions, tensor.ggml_type });
+        const offset = tensor.offset + file.tensor_data_offset;
+        std.debug.print("Got tensor {s} with dim {d} shape {any} ({}) at {d}\n", .{
+            tensor.name.str,
+            tensor.dimensions.len,
+            tensor.dimensions,
+            tensor.ggml_type,
+            offset,
+        });
     }
 
     std.debug.print("\n", .{});

@@ -893,8 +893,8 @@ pub const TransformerBlock = struct {
         std.debug.assert(n < 32);
         var buf = [_]u8{0} ** 64;
         const full_name = std.fmt.bufPrint(&buf, "blk.{d}.{s}.weight", .{ n, name }) catch unreachable;
-        if (file.getTensorInfo(full_name)) |tensor| {
-            return tensor.getElems(file.tensor_data_offset);
+        if (file.getTensorWeights(full_name)) |tensor| {
+            return tensor;
         }
         std.debug.print("Error: Tensor {s} does not exist in the GGUF file", .{full_name});
         @panic("Could not load tensor");
@@ -1647,8 +1647,8 @@ pub const LlamaContext = struct {
 };
 
 fn loadWeights(file: ggml.GGUFFile, name: []const u8) !Weights {
-    if (file.getTensorInfo(name)) |tensor| {
-        return tensor.getElems(file.tensor_data_offset);
+    if (file.getTensorWeights(name)) |wts| {
+        return wts;
     }
     std.debug.print("Missing tensor weights in file: {s}\n", .{name});
     return Error.BadFile;

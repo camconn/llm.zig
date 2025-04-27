@@ -35,8 +35,9 @@ inline fn same(lhs: Weights, rhs: Weights) bool {
 
 /// On-disk structure of the serialized `Q8_0` format in GGML. See [1] for more info.
 /// [1]: https://github.com/ggml-org/llama.cpp/blob/2d451c80590b9ac250322769ac13d3b4870dbcf7/ggml/src/ggml-common.h#L213
-const Q80Block = extern struct {
-    scale: f32,
+pub const Q80Block = extern struct {
+    /// Scale is converted from a uint16_t into a single precision float.
+    scale: u16,
     // QK8_0 = 32 in the ggml reference
     weights: [32]i8,
 };
@@ -57,7 +58,8 @@ test "Block() size" {
 
     // Ensure Q8_0 compatibility when reading from a GGUF file.
     const Q8_0Block = Block(.q8_0);
-    try std.testing.expectEqual(@sizeOf(f32) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
+    try std.testing.expectEqual(@sizeOf(i16) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
+    try std.testing.expectEqual(34, @sizeOf(Q8_0Block));
 }
 
 /// Get the unit length of a `Block()`.
@@ -445,10 +447,10 @@ fn matrixMul_q8_0(out: []f32, m: []const Q80Block, x: []const Q80Block, rows: us
 
     // We can't have leftover weights because both `m` and `x` have chunks of 32 weights because
     // they are slices of `Q80Block`s
+    const col_blocks = cols >> block_log2;
 
     for (0..rows) |row| {
-        const m_off = row * cols;
-        const m_start_block = m_off >> block_log2;
+        const m_off = row * col_blocks;
 
         // For two dequantized number blocks `m` and `n` in Q8_0:
         //     m_a = s_m * x_a
@@ -473,17 +475,18 @@ fn matrixMul_q8_0(out: []f32, m: []const Q80Block, x: []const Q80Block, rows: us
             // for each block in xs, gather the xs.
             const xs: Vec = block.weights;
 
-            const m_idx = m_start_block + n;
+            const m_idx = m_off + n;
             const m_block = m[m_idx];
             const ms: Vec = m_block.weights;
 
             const x_scale = block.scale;
             const m_scale = m_block.scale;
+            const scale_f: f32 = @floatFromInt(x_scale * m_scale);
 
             const prod = xs * ms;
             const pre_sum = @reduce(.Add, prod);
             const prod_f: f32 = @floatFromInt(pre_sum);
-            const final_sum = prod_f * x_scale * m_scale;
+            const final_sum = prod_f * scale_f;
 
             sum += final_sum;
         }
@@ -617,17 +620,19 @@ const max_magnitude = struct {
 };
 
 // TODO: Vectorize this
+const Q80_MAX = 127;
 fn quantize_q8_0(in: []const f32, blocks: []Block(.q8_0)) f32 {
-    // Calculate max error
-    var err: f32 = 0;
     const n_blocks = blocks.len;
     const BlockType = Block(.q8_0);
     const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
     const ArrayElem = array_info.child;
     const block_size = array_info.len;
 
-    //const min_val: @Vector(32, i8) = @splat(-127.0);
-    //const max_val: @Vector(32, i8) = @splat(127.0);
+    // Calculate max error
+    var err: f32 = 0;
+
+    //const min_val: @Vector(32, i8) = @splat(-Q80_MAX);
+    //const max_val: @Vector(32, i8) = @splat(Q80_MAX);
 
     for (0..n_blocks) |i| {
         var blk: BlockType = undefined;
@@ -637,19 +642,20 @@ fn quantize_q8_0(in: []const f32, blocks: []Block(.q8_0)) f32 {
         const elems: []const f32 = in[idx .. idx + block_size];
 
         const max: f32 = std.sort.max(f32, elems, {}, max_magnitude.lessThan) orelse 0;
-        const scale = @abs(max / 127.0);
-        blk.scale = scale;
+        const scale = @abs(max / Q80_MAX);
+        std.debug.assert(scale >= 0);
+        const scale_int: u32 = @intFromFloat(scale);
+        blk.scale = @intCast(scale_int);
         // In the GGML reference the scale is inverted so that a cheaper multiply op can be
         // used element-wise.
         const inv_scale = if (scale == 0) 1 else 1 / scale; // ternary because divide-by-zero
 
-        //const old: @Vector(32, i) = elems[j][0..32].*;
         for (0..block_size) |j| {
             const old = elems[j];
 
             const scaled = std.math.round(old * inv_scale);
             // Ensure we are within 8 bits in a symmetric range.
-            const rounded = std.math.clamp(scaled, -127.0, 127.0);
+            const rounded = std.math.clamp(scaled, -Q80_MAX, Q80_MAX);
 
             // Save quantized weight
             const quantized: ArrayElem = @intFromFloat(rounded);
@@ -722,7 +728,8 @@ fn dequantize_q8_0(in: []const Block(.q8_0), out: []f32) void {
 
         const idx = block_size * i;
 
-        const scale = block.scale;
+        const scale: f32 = @floatFromInt(block.scale);
+        std.debug.assert(scale >= 0);
         for (0..block_size) |j| {
             const elem = block.weights[j];
             const elem_f: f32 = @floatFromInt(elem);

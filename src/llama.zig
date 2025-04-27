@@ -9,8 +9,9 @@
 
 const std = @import("std");
 
-const ggml = @import("ggml.zig");
-const math = @import("math.zig");
+const llm = @import("root.zig");
+const ggml = llm.ggml;
+const math = llm.math;
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -830,31 +831,31 @@ const Weights = []align(4) const f32;
 /// Represents a single `TransformerBlock` of the Llama V1/V2 transformer.
 /// This method contains all the weights for a single "layer" of a model's layers.
 pub const TransformerBlock = struct {
-    attn_norm: Weights,
-    wq: Weights,
-    wk: Weights,
-    wv: Weights,
-    wo: Weights,
+    attn_norm: math.Weights,
+    wq: math.Weights,
+    wk: math.Weights,
+    wv: math.Weights,
+    wo: math.Weights,
 
-    ffn_norm: Weights,
-    w1: Weights,
-    w2: Weights,
-    w3: Weights,
+    ffn_norm: math.Weights,
+    w1: math.Weights,
+    w2: math.Weights,
+    w3: math.Weights,
 
     /// Initialize a transformer block with the provided backing `file` `mmap(2)` using config
     /// if this is `n`-th layer.
     fn initGGML(file: ggml.GGUFFile, _: Config, n: usize) TransformerBlock {
         // TODO: Assert that weights have correct sizes w/ passed-in config
-        const attn_norm = getTensor(f32, "attn_norm", file, n);
-        const wq = getTensor(f32, "attn_q", file, n);
-        const wk = getTensor(f32, "attn_k", file, n);
-        const wv = getTensor(f32, "attn_v", file, n);
-        const wo = getTensor(f32, "attn_output", file, n);
+        const attn_norm = getTensor("attn_norm", file, n);
+        const wq = getTensor("attn_q", file, n);
+        const wk = getTensor("attn_k", file, n);
+        const wv = getTensor("attn_v", file, n);
+        const wo = getTensor("attn_output", file, n);
 
-        const ffn_norm = getTensor(f32, "ffn_norm", file, n);
-        const w1 = getTensor(f32, "ffn_gate", file, n);
-        const w2 = getTensor(f32, "ffn_down", file, n);
-        const w3 = getTensor(f32, "ffn_up", file, n);
+        const ffn_norm = getTensor("ffn_norm", file, n);
+        const w1 = getTensor("ffn_gate", file, n);
+        const w2 = getTensor("ffn_down", file, n);
+        const w3 = getTensor("ffn_up", file, n);
 
         return .{
             .attn_norm = attn_norm,
@@ -871,12 +872,12 @@ pub const TransformerBlock = struct {
 
     /// Get the contents of a tensor named `blk.<n>.<name>.weight` from the loaded GGUF `file`.
     /// Assumes that the backing tensor exists within the GGUF file.
-    fn getTensor(T: type, name: []const u8, file: ggml.GGUFFile, n: usize) []const T {
+    fn getTensor(name: []const u8, file: ggml.GGUFFile, n: usize) math.Weights {
         std.debug.assert(n < 32);
         var buf = [_]u8{0} ** 64;
         const full_name = std.fmt.bufPrint(&buf, "blk.{d}.{s}.weight", .{ n, name }) catch unreachable;
         if (file.getTensorInfo(full_name)) |tensor| {
-            return tensor.getElems(T, file.tensor_data_offset);
+            return tensor.getElems(file.tensor_data_offset);
         }
         std.debug.print("Error: Tensor {s} does not exist in the GGUF file", .{full_name});
         @panic("Could not load tensor");
@@ -901,13 +902,13 @@ pub const TransformerV1 = struct {
     config: Config,
 
     // Embeddings
-    token_embed: Weights,
+    token_embed: math.Weights,
     // Transformer layers
     layers: []TransformerBlock,
     // Output norms
-    norm: Weights,
+    norm: math.Weights,
     // Only set whenever no shared classifier layer with tokenizer
-    classifier: Weights,
+    classifier: math.Weights,
 
     /// Initialize a transformer from a `.bin` file exported by the *V1 Export* of `llama2.c`'s
     /// [export.py script](https://github.com/karpathy/llama2.c/blob/master/export.py).
@@ -1057,16 +1058,16 @@ pub const TransformerV1 = struct {
             const l_w3 = w3[ffn_o..ffn_e];
 
             layers[n] = TransformerBlock{
-                .attn_norm = l_attn_norm,
-                .wq = l_wq,
-                .wk = l_wk,
-                .wv = l_wv,
-                .wo = l_wo,
+                .attn_norm = .{ .f32 = l_attn_norm },
+                .wq = .{ .f32 = l_wq },
+                .wk = .{ .f32 = l_wk },
+                .wv = .{ .f32 = l_wv },
+                .wo = .{ .f32 = l_wo },
 
-                .ffn_norm = l_ffn_norm,
-                .w1 = l_w1,
-                .w2 = l_w2,
-                .w3 = l_w3,
+                .ffn_norm = .{ .f32 = l_ffn_norm },
+                .w1 = .{ .f32 = l_w1 },
+                .w2 = .{ .f32 = l_w2 },
+                .w3 = .{ .f32 = l_w3 },
             };
         }
 
@@ -1076,10 +1077,10 @@ pub const TransformerV1 = struct {
             .ptr = ptr,
             .arena = arena,
 
-            .token_embed = token_embed,
+            .token_embed = .{ .f32 = token_embed },
             .layers = layers,
-            .norm = norms,
-            .classifier = out_classifier.?,
+            .norm = .{ .f32 = norms },
+            .classifier = .{ .f32 = out_classifier.? },
         };
     }
 
@@ -1111,7 +1112,7 @@ pub const TransformerV1 = struct {
         const head_size = c.dim / c.n_heads;
 
         const token_offset: usize = @as(usize, @intCast(token)) * dim;
-        const embeddings = self.token_embed[token_offset .. token_offset + dim];
+        const embeddings = self.token_embed.f32[token_offset .. token_offset + dim];
         @memcpy(state.input, embeddings);
 
         const layer_progress = progress.start("Layer", c.n_layers);
@@ -1190,15 +1191,15 @@ pub const TransformerV1 = struct {
 
             // TransformerBlock.forward()
             // first handle the `attention_norm` call.
-            math.rmsNorm(state.work, state.input, layer.attn_norm);
+            math.rmsNorm(state.work, state.input, layer.attn_norm.f32);
 
             // Now handle attention matrix multiplies
             // xq = wq(x)
-            math.matrixMul(f32, state.q, layer.wq, state.work, dim, dim);
+            math.matrixMul(f32, state.q, layer.wq.f32, state.work, dim, dim);
             // xk = wk(x)
-            math.matrixMul(f32, state.k, layer.wk, state.work, kv_dim, dim);
+            math.matrixMul(f32, state.k, layer.wk.f32, state.work, kv_dim, dim);
             // xv = wv(x)
-            math.matrixMul(f32, state.v, layer.wv, state.work, kv_dim, dim);
+            math.matrixMul(f32, state.v, layer.wv.f32, state.work, kv_dim, dim);
 
             // RoPE
             //     xq, xk = apply_rotary_emb(xq, xk, freq_cs, freq_ss)
@@ -1227,7 +1228,7 @@ pub const TransformerV1 = struct {
             //     return wo(output)
             const attention_preout = state.work[0..];
 
-            math.matrixMul(f32, state.work2[0..dim], layer.wo, attention_preout, dim, dim);
+            math.matrixMul(f32, state.work2[0..dim], layer.wo.f32, attention_preout, dim, dim);
             // End of Attention.forward(x);
 
             // We are back in TransformerBlock.forward(x, freq_cs, freq_ss). We just need to add
@@ -1241,22 +1242,22 @@ pub const TransformerV1 = struct {
             // We are no longer using the input `x` and can now use it as `h`.
 
             // Calculate ff = self.ffn_norm(h) = RMSNorm(h, feed_forward)
-            math.rmsNorm(state.work, state.input, layer.ffn_norm);
+            math.rmsNorm(state.work, state.input, layer.ffn_norm.f32);
 
             // Calculate FeedForward.forward(x):
             //     return w2( silu(w1(x)) * w3(x) )
 
             // hid1 = w1(x)
-            math.matrixMul(f32, state.hidden1, layer.w1, state.work, c.hidden_dim, dim);
+            math.matrixMul(f32, state.hidden1, layer.w1.f32, state.work, c.hidden_dim, dim);
             // hid2 = w3(x)
-            math.matrixMul(f32, state.hidden2, layer.w3, state.work, c.hidden_dim, dim);
+            math.matrixMul(f32, state.hidden2, layer.w3.f32, state.work, c.hidden_dim, dim);
 
             // Calculate SwiGLU
             math.swiglu(state.hidden1);
             math.elementProduct(state.hidden1, state.hidden1, state.hidden2);
 
             // w2 * (swiglu(w2(x)) * w3(x))
-            math.matrixMul(f32, state.work, layer.w2, state.hidden1, dim, c.hidden_dim);
+            math.matrixMul(f32, state.work, layer.w2.f32, state.hidden1, dim, c.hidden_dim);
             // Done with FeedForward.forward(x)
 
             // Add back `h` to result of FeedForward.forward(x)
@@ -1275,13 +1276,13 @@ pub const TransformerV1 = struct {
 
         // Done with layers
         //     h = self.norm(h)
-        math.rmsNorm(state.input, state.input, self.norm);
+        math.rmsNorm(state.input, state.input, self.norm.f32);
 
         ending.completeOne();
 
         // We are doing inference only, so no calculation of cross-entropy is needed
         // Logits are found by feeding `h` (state.input) through a linear layer.
-        math.matrixMul(f32, state.output, self.classifier, state.input, c.vocab_size, dim);
+        math.matrixMul(f32, state.output, self.classifier.f32, state.input, c.vocab_size, dim);
 
         ending.completeOne();
         ending.end();
@@ -1468,11 +1469,9 @@ pub const LlamaContext = struct {
         errdefer state.deinit();
 
         // Load Transformer Weights
-        const EmbedType = f32;
-        const token_embed = try loadWeights(EmbedType, file, "token_embd.weight"); // sic
-        const output_norm = try loadWeights(f32, file, "output_norm.weight");
-        const OutputType = f32;
-        const output_weight = try loadWeights(OutputType, file, "output.weight");
+        const token_embed = try loadWeights(file, "token_embd.weight"); // sic
+        const output_norm = try loadWeights(file, "output_norm.weight");
+        const output_weight = try loadWeights(file, "output.weight");
 
         var arena = ArenaAllocator.init(alloc);
         errdefer arena.deinit();
@@ -1567,9 +1566,9 @@ pub const LlamaContext = struct {
     }
 };
 
-fn loadWeights(T: type, file: ggml.GGUFFile, name: []const u8) ![]const T {
+fn loadWeights(file: ggml.GGUFFile, name: []const u8) !math.Weights {
     if (file.getTensorInfo(name)) |tensor| {
-        return (&tensor).getElems(T, file.tensor_data_offset);
+        return tensor.getElems(file.tensor_data_offset);
     }
     std.debug.print("Missing tensor weights in file: {s}\n", .{name});
     return Error.BadFile;

@@ -9,6 +9,9 @@
 
 const std = @import("std");
 
+const llm = @import("root.zig");
+const math = llm.math;
+
 const Alloc = std.mem.Allocator;
 const Arena = std.heap.ArenaAllocator;
 
@@ -316,10 +319,7 @@ pub const TensorInfo = struct {
 
     /// Get a raw slice of the Tensor's data in native model order.
     /// Get the elements of this tensor from the files `mmap(2)` pointer.
-    pub fn getElems(self: Self, T: type, data_start: usize) []const T {
-        // TODO: Figure out a better way of enforcing type safety.
-        //std.debug.assert(T == self.getElemType());
-
+    pub fn getElems(self: Self, data_start: usize) math.Weights {
         const target = data_start + self.offset;
 
         var len: usize = 1;
@@ -328,8 +328,27 @@ pub const TensorInfo = struct {
         }
         std.debug.assert(len >= 1);
 
-        const ptr: [*]T = @ptrFromInt(target);
-        return ptr[0..len];
+        switch (self.ggml_type) {
+            .F32 => {
+                const ptr: [*]math.Block(.f32) = @ptrFromInt(target);
+                return .{ .f32 = ptr[0..len] };
+            },
+            .Q8_0 => {
+                const Block = math.Block(.q8_0);
+                const ptr: [*]Block = @ptrFromInt(target);
+                const block_len = @typeInfo(@FieldType(Block, "weights")).array.len;
+                // Verify that the length divides cleanly into the number of blocks.
+                const rem = @rem(len, block_len);
+                std.debug.assert(rem == 0);
+
+                const num_blocks = len / block_len;
+                return .{ .q8_0 = ptr[0..num_blocks] };
+            },
+            else => {
+                std.debug.print("ggml: Unsupported quantization, this is a library bug {}\n", .{self.ggml_type});
+                @panic("Unsupported tensor quantization load");
+            },
+        }
     }
 };
 
@@ -623,13 +642,14 @@ pub fn main() !void {
             .uint32 => std.debug.print("{s}: u32 {d}\n", .{ kv.key.str, kv.value.uint32 }),
             .uint64 => std.debug.print("{s}: u64 {d}\n", .{ kv.key.str, kv.value.uint64 }),
             .string => std.debug.print("{s}: {s}\n", .{ kv.key.str, kv.value.string.str }),
+            .array => std.debug.print("{s}: array {} len {d}\n", .{ kv.key.str, kv.value.array.elem_type, kv.value.array.len }),
             else => std.debug.print("{s}: {}\n", .{ kv.key.str, value_type }),
         }
     }
 
     std.debug.print("\nPrinting tensor info\n", .{});
     for (file.tensor_info) |tensor| {
-        std.debug.print("Got tensor {s} with dim {d} shape {any}\n", .{ tensor.name.str, tensor.dimensions.len, tensor.dimensions });
+        std.debug.print("Got tensor {s} with dim {d} shape {any} ({})\n", .{ tensor.name.str, tensor.dimensions.len, tensor.dimensions, tensor.ggml_type });
     }
 
     std.debug.print("\n", .{});

@@ -11,8 +11,8 @@ const std = @import("std");
 /// Helper struct for referencing quantized weights.
 /// Contains a slice of `Block`s in `WeightFormat` to use when performing calculations.
 pub const Weights = union(WeightFormat) {
-    f32: Block(.f32),
-    q8_0: Block(.q8_0),
+    f32: []const Block(.f32),
+    q8_0: []const Block(.q8_0),
 };
 
 /// Quantization types for model weights.

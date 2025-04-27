@@ -16,6 +16,8 @@ const math = llm.math;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
+const Weights = math.Weights;
+
 pub const Error = error{
     /// You attempted to load a file that has an invalid format. Usually this means the file had
     /// a bad header or the wrong version. This could also mean that the file is truncated or has
@@ -824,23 +826,19 @@ fn apply_rope_embeddings(
     }
 }
 
-/// Represents the flattened weights of a neural network.
-/// The best guess we have is that the alignment is *4* based on the size of an f32.
-const Weights = []align(4) const f32;
-
 /// Represents a single `TransformerBlock` of the Llama V1/V2 transformer.
 /// This method contains all the weights for a single "layer" of a model's layers.
 pub const TransformerBlock = struct {
-    attn_norm: math.Weights,
-    wq: math.Weights,
-    wk: math.Weights,
-    wv: math.Weights,
-    wo: math.Weights,
+    attn_norm: Weights,
+    wq: Weights,
+    wk: Weights,
+    wv: Weights,
+    wo: Weights,
 
-    ffn_norm: math.Weights,
-    w1: math.Weights,
-    w2: math.Weights,
-    w3: math.Weights,
+    ffn_norm: Weights,
+    w1: Weights,
+    w2: Weights,
+    w3: Weights,
 
     /// Initialize a transformer block with the provided backing `file` `mmap(2)` using config
     /// if this is `n`-th layer.
@@ -872,7 +870,7 @@ pub const TransformerBlock = struct {
 
     /// Get the contents of a tensor named `blk.<n>.<name>.weight` from the loaded GGUF `file`.
     /// Assumes that the backing tensor exists within the GGUF file.
-    fn getTensor(name: []const u8, file: ggml.GGUFFile, n: usize) math.Weights {
+    fn getTensor(name: []const u8, file: ggml.GGUFFile, n: usize) Weights {
         std.debug.assert(n < 32);
         var buf = [_]u8{0} ** 64;
         const full_name = std.fmt.bufPrint(&buf, "blk.{d}.{s}.weight", .{ n, name }) catch unreachable;
@@ -902,13 +900,13 @@ pub const TransformerV1 = struct {
     config: Config,
 
     // Embeddings
-    token_embed: math.Weights,
+    token_embed: Weights,
     // Transformer layers
     layers: []TransformerBlock,
     // Output norms
-    norm: math.Weights,
+    norm: Weights,
     // Only set whenever no shared classifier layer with tokenizer
-    classifier: math.Weights,
+    classifier: Weights,
 
     /// Initialize a transformer from a `.bin` file exported by the *V1 Export* of `llama2.c`'s
     /// [export.py script](https://github.com/karpathy/llama2.c/blob/master/export.py).
@@ -976,16 +974,16 @@ pub const TransformerV1 = struct {
         // attention:   [4096]f32
         // ffn_norm:    [4096]f32
         // norm:        [4096]f32
-        const rms_attention: Weights = weights[i .. i + n_layers * dim];
+        const rms_attention = weights[i .. i + n_layers * dim];
         i += rms_attention.len;
-        const ffn_norm: Weights = weights[i .. i + n_layers * dim];
+        const ffn_norm = weights[i .. i + n_layers * dim];
         i += ffn_norm.len;
-        const norms: Weights = weights[i .. i + dim];
+        const norms = weights[i .. i + dim];
         i += norms.len;
 
         // token embeddings (7b)
         // embed:       [vocab_size][4096]f32
-        const token_embed: Weights = weights[i .. i + vocab * dim];
+        const token_embed = weights[i .. i + vocab * dim];
         i += token_embed.len;
 
         // attention layers (7b)
@@ -994,13 +992,13 @@ pub const TransformerV1 = struct {
         // wv:          [4096][4096]f32
         // wo:          [4096][4096]f32
 
-        const wq: Weights = weights[i .. i + n_layers * dim * (n_heads * head_size)];
+        const wq = weights[i .. i + n_layers * dim * (n_heads * head_size)];
         i += wq.len;
-        const wk: Weights = weights[i .. i + n_layers * dim * (n_kv_heads * head_size)];
+        const wk = weights[i .. i + n_layers * dim * (n_kv_heads * head_size)];
         i += wq.len;
-        const wv: Weights = weights[i .. i + n_layers * dim * (n_kv_heads * head_size)];
+        const wv = weights[i .. i + n_layers * dim * (n_kv_heads * head_size)];
         i += wv.len;
-        const wo: Weights = weights[i .. i + n_layers * (n_heads * head_size) * dim];
+        const wo = weights[i .. i + n_layers * (n_heads * head_size) * dim];
         i += wo.len;
 
         // ff layers (7b)
@@ -1008,14 +1006,14 @@ pub const TransformerV1 = struct {
         // w2:          [4096][11008]f32
         // w3:          [11008][4096]f32
         // output:      [vocab_size][4096]f32
-        const w1: Weights = weights[i .. i + n_layers * dim * hidden_dim];
+        const w1 = weights[i .. i + n_layers * dim * hidden_dim];
         i += w1.len;
-        const w2: Weights = weights[i .. i + n_layers * hidden_dim * dim];
+        const w2 = weights[i .. i + n_layers * hidden_dim * dim];
         i += w2.len;
-        const w3: Weights = weights[i .. i + n_layers * dim * hidden_dim];
+        const w3 = weights[i .. i + n_layers * dim * hidden_dim];
         i += w3.len;
 
-        var out_classifier: ?Weights = null;
+        var out_classifier: ?[]const f32 = null;
         if (config.shared_classifier) {
             out_classifier = token_embed;
         } else {
@@ -1566,7 +1564,7 @@ pub const LlamaContext = struct {
     }
 };
 
-fn loadWeights(file: ggml.GGUFFile, name: []const u8) !math.Weights {
+fn loadWeights(file: ggml.GGUFFile, name: []const u8) !Weights {
     if (file.getTensorInfo(name)) |tensor| {
         return tensor.getElems(file.tensor_data_offset);
     }

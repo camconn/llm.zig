@@ -53,6 +53,22 @@ test "Block() size" {
     try std.testing.expectEqual(@sizeOf(f32) + 32 * @sizeOf(i8), @sizeOf(Q8_0Block));
 }
 
+/// Get the unit length of a `Block()`.
+pub fn blockUnitLen(BlockType: type) comptime_int {
+    if (BlockType == f32) {
+        return 1;
+    }
+
+    const struct_info = @FieldType(BlockType, "weights");
+    const array_type = @typeInfo(struct_info).array;
+    return array_type.len;
+}
+
+test "block unit length" {
+    try std.testing.expectEqual(1, blockUnitLen(Block(.f32)));
+    try std.testing.expectEqual(32, blockUnitLen(Block(.q8_0)));
+}
+
 /// Create a SIMD vector for arbitrary type `T`.
 fn Vect(comptime T: type) type {
     const len = comptime std.simd.suggestVectorLength(T) orelse 8;
@@ -603,36 +619,27 @@ test "quantize weights" {
 pub fn dequantize(
     comptime format: WeightFormat,
     weights: []const Block(format),
-    allocator: std.mem.Allocator,
-) ![]const f32 {
+    out: []f32,
+) !void {
     if (weights.len == 0) {
         return error.Empty;
     }
 
     if (format == .f32) {
-        return weights;
+        return;
     }
-
-    const BlockType = Block(format);
-    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
-    const block_size = array_info.len;
-
-    const n_out = weights.len * block_size;
-    const out = try allocator.alloc(f32, n_out);
-    errdefer allocator.free(out);
 
     switch (format) {
         .q8_0 => dequantize_q8_0(weights, out),
         else => @compileError("dequantize method is unimplemented for " ++ format),
     }
-    return out;
+    return;
 }
 
 // TODO: Vectorize this
 fn dequantize_q8_0(in: []const Block(.q8_0), out: []f32) void {
     const BlockType = Block(.q8_0);
-    const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
-    const block_size = array_info.len;
+    const block_size = blockUnitLen(BlockType);
 
     for (0..in.len) |i| {
         const block = in[i];
@@ -649,10 +656,11 @@ fn dequantize_q8_0(in: []const Block(.q8_0), out: []f32) void {
 }
 
 test "dequantize weights" {
+    var out = [_]f32{0} ** 32;
     const empty = [0]f32{};
-    try std.testing.expectError(error.Empty, dequantize(.f32, &empty, std.testing.allocator));
+    try std.testing.expectError(error.Empty, dequantize(.f32, &empty, &out));
     const empty_q80 = [0]Block(.q8_0){};
-    try std.testing.expectError(error.Empty, dequantize(.q8_0, &empty_q80, std.testing.allocator));
+    try std.testing.expectError(error.Empty, dequantize(.q8_0, &empty_q80, &out));
 
     const no_scale = [_]f32{
         1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13,  14,  15,  16,
@@ -661,6 +669,6 @@ test "dequantize weights" {
 
     const q80_no_scale = try quantize(.q8_0, &no_scale, std.testing.allocator);
     defer std.testing.allocator.free(q80_no_scale[0]);
-    const out_dequantized = try dequantize(.q8_0, q80_no_scale[0], std.testing.allocator);
-    defer std.testing.allocator.free(out_dequantized);
+    try dequantize(.q8_0, q80_no_scale[0], &out);
+    try std.testing.expectEqualSlices(f32, &no_scale, &out);
 }

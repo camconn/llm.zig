@@ -1109,9 +1109,7 @@ pub const TransformerV1 = struct {
         //const kv_mul = c.n_heads / c.n_kv_heads;
         const head_size = c.dim / c.n_heads;
 
-        const token_offset: usize = @as(usize, @intCast(token)) * dim;
-        const embeddings = self.token_embed.f32[token_offset .. token_offset + dim];
-        @memcpy(state.input, embeddings);
+        self.applyTokenEmbedding(state, token);
 
         const layer_progress = progress.start("Layer", c.n_layers);
 
@@ -1288,6 +1286,27 @@ pub const TransformerV1 = struct {
         progress.completeOne();
 
         return state.output;
+    }
+
+    /// Apply and copy token embeddings for the current input `token` into the current `state`.
+    fn applyTokenEmbedding(self: Self, state: *State, token: Tokenizer.Token) void {
+        const dim = self.config.dim;
+        const token_offset: usize = @as(usize, @intCast(token)) * dim;
+
+        switch (self.token_embed) {
+            .f32 => |floats| {
+                const embeddings = floats[token_offset .. token_offset + dim];
+                @memcpy(state.input, embeddings);
+            },
+            .q8_0 => |quantized| {
+                const block_size = math.blockUnitLen(math.Block(.q8_0));
+                const block_offset = token_offset / block_size;
+                const n_blocks = dim / block_size;
+
+                const embeddings = quantized[block_offset .. block_offset + n_blocks];
+                math.dequantize(.q8_0, embeddings, state.input) catch @panic("Terrible situation in embeddings");
+            },
+        }
     }
 
     /// Perform attention the current forward layer iteration of the Transformer.

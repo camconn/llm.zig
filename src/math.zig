@@ -220,22 +220,59 @@ test "RMSNorm" {
 pub fn softMax(x: []f32) void {
     std.debug.assert(x.len != 0); // required for `std.sort.max`
 
-    // TODO: Make this SIMD w/ vectors. This is embarrassingly parallelizable
+    const Vec = comptime Vect(f32);
+    const vector_len = comptime vectLen(Vec);
 
     // Find maximum value for safe softmax
     const max_val = std.sort.max(f32, x, {}, std.sort.asc(f32)).?;
 
+    const shift_r: u6 = @intCast(std.math.log2_int(usize, vector_len));
+    const chunks = x.len >> shift_r;
+    const leftover_offset = chunks * vector_len;
+
+    // Create total sum and replace every element in `x` with exp(x[i] - max).
     var sum: f32 = 0;
-    for (0..x.len) |i| {
+    const max: Vec = @splat(max_val);
+    for (0..chunks) |i| {
+        const vals: Vec = x[i * vector_len ..][0..vector_len].*;
+        const exp = @exp(vals - max);
+        const chunk_sum = @reduce(.Add, exp);
+        sum += chunk_sum;
+
+        x[i * vector_len ..][0..vector_len].* = exp;
+    }
+
+    // Handle leftovers from SIMD
+    for (leftover_offset..x.len) |i| {
         const val = @exp(x[i] - max_val);
         sum += val;
         x[i] = val;
     }
 
-    // normalize
-    for (0..x.len) |i| {
+    // Now normalize with the divisor
+    const summ: Vec = @splat(sum);
+    for (0..chunks) |i| {
+        const vals: Vec = x[i * vector_len ..][0..vector_len].*;
+        const normalized = vals / summ;
+        x[i * vector_len ..][0..vector_len].* = normalized;
+    }
+
+    // Handle leftovers from SIMD
+    for (leftover_offset..x.len) |i| {
         x[i] /= sum;
     }
+
+    //var sum: f32 = 0;
+    //for (0..x.len) |i| {
+    //    const val = @exp(x[i] - max_val);
+    //    sum += val;
+    //    x[i] = val;
+    //}
+
+    //// normalize
+    //for (0..x.len) |i| {
+    //    x[i] /= sum;
+    //}
 }
 
 test "softMax" {
@@ -266,7 +303,8 @@ pub fn swiglu(x: []f32) void {
         const idx = i * vector_len;
         const xs: Vec = x[idx .. idx + vector_len][0..vector_len].*;
 
-        const exp: Vec = std.math.exp(-xs);
+        //const exp: Vec = std.math.exp(-xs);
+        const exp: Vec = @exp(-xs);
         const ones: Vec = @splat(1);
         const denom = ones + exp;
 
@@ -406,7 +444,7 @@ pub fn matrixMul(out: []f32, m: Weights, x: Weights, rows: usize, cols: usize) v
 }
 
 /// Matrix multiply for raw f32 weights.
-pub fn matrixMul_f32(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: usize) void {
+fn matrixMul_f32(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: usize) void {
     const Vec = comptime Vect(f32);
     const vector_len = comptime vectLen(Vec);
 
@@ -628,6 +666,9 @@ test "max_magnitude lessThan" {
 }
 
 // TODO: Vectorize this
+/// Quantize `f32` values into blocks of the `Q8_0` quantization format.
+/// Refer to `quantize_row_q8_0_ref` in GGML [1] for the reference implementation.
+/// [1]: https://github.com/ggml-org/ggml/blob/489716ba99ecd51164f79e8c6fec0b5bf634eac9/src/ggml-quants.c#L194
 fn quantize_q8_0(in: []const f32, blocks: []Block(.q8_0)) f32 {
     const n_blocks = blocks.len;
     const BlockType = Block(.q8_0);
@@ -721,6 +762,9 @@ pub fn dequantize(
 }
 
 // TODO: Vectorize this
+/// Dequantize block from the `Q8_0` quantization format into their `f32` values.
+/// Refer to `dequantize_row_q8_0` in GGML [1] for the reference implementation.
+/// [1]: https://github.com/ggml-org/ggml/blob/489716ba99ecd51164f79e8c6fec0b5bf634eac9/src/ggml-quants.c#L349
 fn dequantize_q8_0(in: []const Block(.q8_0), out: []f32) void {
     const BlockType = Block(.q8_0);
     const block_size = blockUnitLen(BlockType);

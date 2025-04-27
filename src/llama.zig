@@ -38,9 +38,12 @@ pub const Config = struct {
     max_seq_length: usize,
 
     shared_classifier: bool,
+    quantized: bool = false,
 
     /// Read the configuration from a GGUF file.
     pub fn readGGUF(file: ggml.GGUFFile) Config {
+        // TODO: Do something more resilient to detect quantization.
+        const quantized = file.fileType().? == .MOSTLY_Q8_0;
         return .{
             .dim = file.getValue("llama.embedding_length").?.uint32,
             .hidden_dim = file.getValue("llama.feed_forward_length").?.uint32,
@@ -50,6 +53,7 @@ pub const Config = struct {
             .vocab_size = file.getValue("tokenizer.ggml.tokens").?.array.len,
             .max_seq_length = file.getValue("llama.context_length").?.uint32,
             .shared_classifier = file.getValue("output.weight") == null,
+            .quantized = quantized,
         };
     }
 
@@ -586,6 +590,7 @@ pub const State = struct {
     // x
     input: []f32,
     // Working state
+    //work: []f32,
     work: []f32,
     // Working state overflow
     work2: []f32,
@@ -593,6 +598,10 @@ pub const State = struct {
     hidden1: []f32,
     // hb2
     hidden2: []f32,
+
+    // quantized weight vector in dimension `dim`
+    quant_vec: Weights,
+    quant_vec2: Weights,
 
     q: []f32,
     k: []f32,
@@ -638,6 +647,13 @@ pub const State = struct {
             a,
         );
 
+        const Block = math.Block(.q8_0);
+        const quant_len = math.blockUnitLen(Block);
+        const quant_count = if (config.quantized) config.dim / quant_len else 0;
+        const quant_vec = try a.alloc(Block, quant_count);
+        const hidden_quant_count = if (config.quantized) config.hidden_dim / quant_len else 0;
+        const quant_vec2 = try a.alloc(Block, hidden_quant_count);
+
         return .{
             // Internal memory lifetime
             .arena = arena,
@@ -657,6 +673,9 @@ pub const State = struct {
             .v_cache = v_cache,
             .attention = att,
             .output = logits,
+
+            .quant_vec = .{ .q8_0 = quant_vec },
+            .quant_vec2 = .{ .q8_0 = quant_vec2 },
         };
     }
 
@@ -1013,7 +1032,7 @@ pub const TransformerV1 = struct {
         const w3 = weights[i .. i + n_layers * dim * hidden_dim];
         i += w3.len;
 
-        var out_classifier: ?[]const f32 = null;
+        var out_classifier: ?[]f32 = null;
         if (config.shared_classifier) {
             out_classifier = token_embed;
         } else {
@@ -1189,13 +1208,28 @@ pub const TransformerV1 = struct {
             // first handle the `attention_norm` call.
             math.rmsNorm(state.work, state.input, layer.attn_norm.f32);
 
+            // TODO: Quantize `state.work` into a partial quantized form.
+            if (c.quantized) {
+                _ = math.quantize(.q8_0, state.work, state.quant_vec.q8_0) catch
+                    @panic("Quantization error");
+            }
+
             // Now handle attention matrix multiplies
-            // xq = wq(x)
-            math.matrixMul(f32, state.q, layer.wq.f32, state.work, dim, dim);
-            // xk = wk(x)
-            math.matrixMul(f32, state.k, layer.wk.f32, state.work, kv_dim, dim);
-            // xv = wv(x)
-            math.matrixMul(f32, state.v, layer.wv.f32, state.work, kv_dim, dim);
+            if (c.quantized) {
+                // xq = wq(x)
+                math.matrixMul(state.q, layer.wq, state.quant_vec, dim, dim);
+                // xk = wk(x)
+                math.matrixMul(state.k, layer.wk, state.quant_vec, kv_dim, dim);
+                // xv = wv(x)
+                math.matrixMul(state.v, layer.wv, state.quant_vec, kv_dim, dim);
+            } else {
+                // xq = wq(x)
+                math.matrixMul(state.q, layer.wq, .{ .f32 = state.work }, dim, dim);
+                // xk = wk(x)
+                math.matrixMul(state.k, layer.wk, .{ .f32 = state.work }, kv_dim, dim);
+                // xv = wv(x)
+                math.matrixMul(state.v, layer.wv, .{ .f32 = state.work }, kv_dim, dim);
+            }
 
             // RoPE
             //     xq, xk = apply_rotary_emb(xq, xk, freq_cs, freq_ss)
@@ -1222,9 +1256,12 @@ pub const TransformerV1 = struct {
             // Almost done w/ Attention.forward(x), we just need to calculate the return
             // statement:
             //     return wo(output)
-            const attention_preout = state.work[0..];
-
-            math.matrixMul(f32, state.work2[0..dim], layer.wo.f32, attention_preout, dim, dim);
+            if (c.quantized) {
+                _ = math.quantize(.q8_0, state.work2, state.quant_vec.q8_0) catch @panic("Issue quantizing after attention");
+                math.matrixMul(state.work2[0..dim], layer.wo, state.quant_vec, dim, dim);
+            } else {
+                math.matrixMul(state.work2[0..dim], layer.wo, .{ .f32 = state.work }, dim, dim);
+            }
             // End of Attention.forward(x);
 
             // We are back in TransformerBlock.forward(x, freq_cs, freq_ss). We just need to add
@@ -1243,17 +1280,36 @@ pub const TransformerV1 = struct {
             // Calculate FeedForward.forward(x):
             //     return w2( silu(w1(x)) * w3(x) )
 
-            // hid1 = w1(x)
-            math.matrixMul(f32, state.hidden1, layer.w1.f32, state.work, c.hidden_dim, dim);
-            // hid2 = w3(x)
-            math.matrixMul(f32, state.hidden2, layer.w3.f32, state.work, c.hidden_dim, dim);
+            if (c.quantized) {
+                _ = math.quantize(.q8_0, state.work, state.quant_vec.q8_0) catch
+                    @panic("Issue quantizing before hidden layers");
+            }
+
+            if (c.quantized) {
+                // hid1 = w1(x)
+                math.matrixMul(state.hidden1, layer.w1, state.quant_vec, c.hidden_dim, dim);
+                // hid2 = w3(x)
+                math.matrixMul(state.hidden2, layer.w3, state.quant_vec, c.hidden_dim, dim);
+            } else {
+                // hid1 = w1(x)
+                math.matrixMul(state.hidden1, layer.w1, .{ .f32 = state.work }, c.hidden_dim, dim);
+                // hid2 = w3(x)
+                math.matrixMul(state.hidden2, layer.w3, .{ .f32 = state.work }, c.hidden_dim, dim);
+            }
 
             // Calculate SwiGLU
             math.swiglu(state.hidden1);
             math.elementProduct(state.hidden1, state.hidden1, state.hidden2);
 
-            // w2 * (swiglu(w2(x)) * w3(x))
-            math.matrixMul(f32, state.work, layer.w2.f32, state.hidden1, dim, c.hidden_dim);
+            if (c.quantized) {
+                // w2 * (swiglu(w2(x)) * w3(x))
+                _ = math.quantize(.q8_0, state.hidden1, state.quant_vec2.q8_0) catch
+                    @panic("Error during quantization");
+                math.matrixMul(state.work, layer.w2, state.quant_vec2, dim, c.hidden_dim);
+            } else {
+                // w2 * (swiglu(w2(x)) * w3(x))
+                math.matrixMul(state.work, layer.w2, .{ .f32 = state.hidden1 }, dim, c.hidden_dim);
+            }
             // Done with FeedForward.forward(x)
 
             // Add back `h` to result of FeedForward.forward(x)
@@ -1278,7 +1334,13 @@ pub const TransformerV1 = struct {
 
         // We are doing inference only, so no calculation of cross-entropy is needed
         // Logits are found by feeding `h` (state.input) through a linear layer.
-        math.matrixMul(f32, state.output, self.classifier.f32, state.input, c.vocab_size, dim);
+        if (c.quantized) {
+            _ = math.quantize(.q8_0, state.input, state.quant_vec.q8_0) catch
+                @panic("Error during quantization");
+            math.matrixMul(state.output, self.classifier, state.quant_vec, c.vocab_size, dim);
+        } else {
+            math.matrixMul(state.output, self.classifier, .{ .f32 = state.input }, c.vocab_size, dim);
+        }
 
         ending.completeOne();
         ending.end();
@@ -1304,7 +1366,8 @@ pub const TransformerV1 = struct {
                 const n_blocks = dim / block_size;
 
                 const embeddings = quantized[block_offset .. block_offset + n_blocks];
-                math.dequantize(.q8_0, embeddings, state.input) catch @panic("Terrible situation in embeddings");
+                math.dequantize(.q8_0, embeddings, state.input) catch
+                    @panic("Terrible situation in embeddings");
             },
         }
     }

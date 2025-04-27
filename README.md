@@ -11,8 +11,10 @@ non-AI code like parsing CLI arguments.
 
 ## Implemented
 - GGML
-    - Loading FP32 quantization is supported for all models with `.gguf` files.
+    - Loading `FP32` and `Q8_0` quantizations are supported for all models with `.gguf` files.
+    - Loading `Q8_0` quantiation is supported for
 - LLaMA 2
+    - `FP32` and `Q8_0` models are supported
     - SentencePiece-like tokenization
     - Key-Value caching
     - Loading "V1" models exported from Andrej Karpathy's [llama2.c](https://github.com/karpathy/llama2.c).
@@ -46,7 +48,7 @@ format. Instructions for generating supported files are shown below.
 How to setup LLaMA 2 inference
 
 ### GGUF Weights
-Obtain a set of `.gguf` weights from somewhere with the `float32` or `fp32` quantization.
+Obtain a set of `.gguf` weights from somewhere with the `float32`/`fp32` or `Q8_0` quantization.
 
 Then, run the model like so:
 

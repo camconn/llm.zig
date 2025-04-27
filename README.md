@@ -39,14 +39,14 @@ $ zig build
 $ ./zig-out/bin/llm_zig --help
 ```
 
-To acutally do inference, you will need to download models in the appropriate
+To actually do inference, you will need to download models in the appropriate
 format. Instructions for generating supported files are shown below.
 
 ## LLaMA
 How to setup LLaMA 2 inference
 
 ### GGUF Weights
-Obtain a set of `.gguf` weights from somewhere with teh `float32` or `fp32` quantization.
+Obtain a set of `.gguf` weights from somewhere with the `float32` or `fp32` quantization.
 
 Then, run the model like so:
 

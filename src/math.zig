@@ -11,8 +11,8 @@ const std = @import("std");
 /// Helper struct for referencing quantized weights.
 /// Contains a slice of `Block`s in `WeightFormat` to use when performing calculations.
 pub const Weights = union(WeightFormat) {
-    f32: []const Block(.f32),
-    q8_0: []const Block(.q8_0),
+    f32: []Block(.f32),
+    q8_0: []Block(.q8_0),
 };
 
 /// Quantization types for model weights.
@@ -25,6 +25,13 @@ pub const WeightFormat = enum {
     /// The original weight `w = i * d` where `i` is the quantized integer and `d` is the scale.
     q8_0,
 };
+
+/// Compare `lhs` and `rhs` to see if they have the same inner quantization format.
+inline fn same(lhs: Weights, rhs: Weights) bool {
+    const a: WeightFormat = lhs;
+    const b: WeightFormat = rhs;
+    return a == b;
+}
 
 /// On-disk structure of the serialized `Q8_0` format in GGML. See [1] for more info.
 /// [1]: https://github.com/ggml-org/llama.cpp/blob/2d451c80590b9ac250322769ac13d3b4870dbcf7/ggml/src/ggml-common.h#L213
@@ -371,16 +378,33 @@ pub fn elementProduct(out: []f32, x: []const f32, y: []const f32) void {
 }
 
 /// Multiply a matrix `m` of (`rows`, `cols`) by a vector `x` of (`cols`) and store in `out`.
-pub fn matrixMul(comptime T: type, out: []T, m: []const T, x: []const T, rows: usize, cols: usize) void {
-    // zig fmt: off
-    //std.debug.print("out: {d}, m: {d}, x: {d}, rows: {d}, cols: {d}\n",
-    //                .{ out.len, m.len, x.len, rows, cols });
-    // zig fmt: on
-    std.debug.assert(out.len == rows);
-    std.debug.assert(x.len == cols);
-    std.debug.assert(m.len == rows * cols);
+/// Requires that the quantization format of `m` and `x` are the same. You can check this with
+/// `same(m, x)`.
+pub fn matrixMul(out: []f32, m: Weights, x: Weights, rows: usize, cols: usize) void {
+    const x_len = switch (x) {
+        .f32 => |f| f.len,
+        .q8_0 => |q| q.len * blockUnitLen(Block(.q8_0)),
+    };
+    const m_len = switch (m) {
+        .f32 => |f| f.len,
+        .q8_0 => |q| q.len * blockUnitLen(Block(.q8_0)),
+    };
 
-    const Vec = comptime Vect(T);
+    std.debug.assert(out.len == rows);
+    std.debug.assert(x_len == cols);
+    std.debug.assert(m_len == rows * cols);
+    std.debug.assert(same(m, x));
+
+    // Poor man's dynamic dispatch
+    switch (m) {
+        .f32 => matrixMul_f32(out, m.f32, x.f32, rows, cols),
+        .q8_0 => matrixMul_q8_0(out, m.q8_0, x.q8_0, rows, cols),
+    }
+}
+
+/// Matrix multiply for raw f32 weights.
+pub fn matrixMul_f32(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: usize) void {
+    const Vec = comptime Vect(f32);
     const vector_len = comptime vectLen(Vec);
 
     const chunks = x.len / vector_len;
@@ -407,25 +431,79 @@ pub fn matrixMul(comptime T: type, out: []T, m: []const T, x: []const T, rows: u
             sum += xs * ms;
         }
 
-        // TODO: Check if we need to convert from `sum` back to an integer per `T`.
+        out[row] = sum;
+    }
+}
+
+/// Matrix multiply for Q8_0 quantized weights.
+fn matrixMul_q8_0(out: []f32, m: []const Q80Block, x: []const Q80Block, rows: usize, cols: usize) void {
+    const Vec = @Vector(32, i32);
+
+    const block_size = comptime blockUnitLen(Q80Block);
+    const block_log2 = comptime std.math.log2(block_size);
+
+    // We can't have leftover weights because both `m` and `x` have chunks of 32 weights because
+    // they are slices of `Q80Block`s
+
+    for (0..rows) |row| {
+        const m_off = row * cols;
+        const m_start_block = m_off >> block_log2;
+
+        // For two dequantized number blocks `m` and `n` in Q8_0:
+        //     m_a = s_m * x_a
+        //     n_a = s_n * y_a
+        // Where a ∈ [1, 32].
+        // So m is a vector of elements [m1, m2, ..., m32]
+        //                     And n is [n1, n2, ..., n32]
+        //
+        // Then product of the element pair `a` of `m` and `n` is
+        //     m_a * n_a = s_m * x_a * s_n * y_a = (s_m*s_n) * (x_a*y_a)
+        //
+        // So to find the sum of the element-wise product of `m` and `n` that would be:
+        // (m_1*n_1) + (m_2*n_2) + ...
+        //      = (s_m*x_1 * s_n*y_1) + (s_m*x_2 + s_n*y_2) + ...
+        //      = (s_m*s_n * x_1*y_1) + (s_m*s_n + x_2*y_2) + ...
+        //      = (s_m*s_n) * ((x_1 * y_1) + (x_2 + y_2) + ...)
+        // So we can do an element-wise product then sum the element-wise products to get a partial
+        // results which we multiply by the scaling factors s_m and s_n to get the final sum
+        // of the scaled products.
+        var sum: f32 = 0;
+        for (0.., x) |n, block| {
+            // for each block in xs, gather the xs.
+            const xs: Vec = block.weights;
+
+            const m_idx = m_start_block + n;
+            const m_block = m[m_idx];
+            const ms: Vec = m_block.weights;
+
+            const x_scale = block.scale;
+            const m_scale = m_block.scale;
+
+            const prod = xs * ms;
+            const pre_sum = @reduce(.Add, prod);
+            const prod_f: f32 = @floatFromInt(pre_sum);
+            const final_sum = prod_f * x_scale * m_scale;
+
+            sum += final_sum;
+        }
         out[row] = sum;
     }
 }
 
 test "matrixMul f32" {
-    const a = [_]f32{ 1, 2, 3, 4, 5, 6 };
-    const b = [_]f32{ 1, 2, 5 };
+    var a = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    var b = [_]f32{ 1, 2, 5 };
     var out2 = [_]f32{0} ** 2;
 
-    matrixMul(f32, &out2, &a, &b, 2, 3);
+    matrixMul(&out2, .{ .f32 = &a }, .{ .f32 = &b }, 2, 3);
     try std.testing.expectEqualDeep([_]f32{ 20, 44 }, out2);
 
-    const d = [_]f32{ 4, -1 };
+    var d = [_]f32{ 4, -1 };
     var out3 = [_]f32{0} ** 3;
-    matrixMul(f32, &out3, &a, &d, 3, 2);
+    matrixMul(&out3, .{ .f32 = &a }, .{ .f32 = &d }, 3, 2);
     try std.testing.expectEqualDeep([_]f32{ 2, 8, 14 }, out3);
 
-    const m = [_]f32{
+    var m = [_]f32{
         81, 11, 41, 97, 22,
         5,  13, 10, 8,  45,
         70, 42, 87, 4,  27,
@@ -439,21 +517,21 @@ test "matrixMul f32" {
         12, 44, 66, 69, 38,
         43, 13, 29, 79, 21,
     };
-    const x = [_]f32{ 6, 18, 19, 4, 5, 15, 8, 7, 6, 3, 6, 1 };
-    const z = [_]f32{ 9, 15, 7, 16, 10 };
+    var x = [_]f32{ 6, 18, 19, 4, 5, 15, 8, 7, 6, 3, 6, 1 };
+    var z = [_]f32{ 9, 15, 7, 16, 10 };
 
     var out5 = [_]f32{0} ** 5;
     const expect5 = [_]f32{
         2855, 4581, 4242, 5244, 5014,
     };
-    matrixMul(f32, &out5, &m, &x, 5, 12);
+    matrixMul(&out5, .{ .f32 = &m }, .{ .f32 = &x }, 5, 12);
     try std.testing.expectEqualDeep(expect5, out5);
 
     var out12 = [_]f32{0} ** 12;
     const expect12 = [_]f32{
         2953, 888, 2203, 3501, 4717, 2083, 3491, 3781, 2697, 2964, 2714, 2259,
     };
-    matrixMul(f32, &out12, &m, &z, 12, 5);
+    matrixMul(&out12, .{ .f32 = &m }, .{ .f32 = &z }, 12, 5);
     try std.testing.expectEqualDeep(expect12, out12);
 }
 

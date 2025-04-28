@@ -1117,7 +1117,7 @@ pub const TransformerV1 = struct {
     ///
     /// Returns a slice of logits from calculation. Caller **does not** down the returned
     /// slice and should not attempt to free it.
-    pub fn forward(self: Self, state: *State, token: Tokenizer.Token, n_token: usize, progress: std.Progress.Node) []f32 {
+    pub fn forward(self: Self, state: *State, token: Tokenizer.Token, n_token: usize, progress: ?std.Progress.Node) []f32 {
         // Get a considerable speedup for operations that occur within here.
         @setFloatMode(.optimized);
 
@@ -1128,9 +1128,13 @@ pub const TransformerV1 = struct {
         //const kv_mul = c.n_heads / c.n_kv_heads;
         const head_size = c.dim / c.n_heads;
 
-        self.applyTokenEmbedding(state, token);
+        self.applyTokenEmbedding(state.input, token);
 
-        const layer_progress = progress.start("Layer", c.n_layers);
+        var layer_progress: ?std.Progress.Node = null;
+        if (progress) |prog| {
+            layer_progress = prog.start("Layer", c.n_layers);
+        }
+        defer if (layer_progress) |prog| prog.end();
 
         for (0..c.n_layers) |i| {
             // Layer offset for caching
@@ -1305,17 +1309,14 @@ pub const TransformerV1 = struct {
             // Done with TransformerBlock.forward();
             //std.debug.print("Done with layer {d}/{d} with {d} at {d}\n", .{ i, c.n_layers, token, n_token });
 
-            layer_progress.completeOne();
+            if (layer_progress) |prog| {
+                prog.completeOne();
+            }
         }
-        layer_progress.end();
-
-        var ending = progress.start("Token Output", 2);
 
         // Done with layers
         //     h = self.norm(h)
         math.rmsNorm(state.input, state.input, self.norm.f32);
-
-        ending.completeOne();
 
         // We are doing inference only, so no calculation of cross-entropy is needed
         // Logits are found by feeding `h` (state.input) through a linear layer.
@@ -1326,23 +1327,22 @@ pub const TransformerV1 = struct {
         const norm_output: Weights = if (c.quantized) state.quant_vec else Weights{ .f32 = state.input };
         math.matrixMul(state.output, self.classifier, norm_output, c.vocab_size, dim);
 
-        ending.completeOne();
-        ending.end();
-
-        progress.completeOne();
+        if (progress) |prog| {
+            prog.completeOne();
+        }
 
         return state.output;
     }
 
-    /// Apply and copy token embeddings for the current input `token` into the current `state`.
-    fn applyTokenEmbedding(self: Self, state: *State, token: Tokenizer.Token) void {
+    /// Apply and copy token embeddings for the current input `token` into the `out` vector.
+    fn applyTokenEmbedding(self: Self, out: []f32, token: Tokenizer.Token) void {
         const dim = self.config.dim;
         const token_offset: usize = @as(usize, @intCast(token)) * dim;
 
         switch (self.token_embed) {
             .f32 => |floats| {
                 const embeddings = floats[token_offset .. token_offset + dim];
-                @memcpy(state.input, embeddings);
+                @memcpy(out, embeddings);
             },
             .q8_0 => |quantized| {
                 const block_size = math.blockUnitLen(math.Block(.q8_0));
@@ -1350,7 +1350,7 @@ pub const TransformerV1 = struct {
                 const n_blocks = dim / block_size;
 
                 const embeddings = quantized[block_offset .. block_offset + n_blocks];
-                math.dequantize(.q8_0, embeddings, state.input) catch
+                math.dequantize(.q8_0, embeddings, out) catch
                     @panic("Terrible situation in embeddings");
             },
         }
@@ -1456,7 +1456,6 @@ pub const Sampler = struct {
             math.softMax(probs);
 
             const random = self.rng.random().float(f32);
-            std.debug.print("random: {d}\n", .{random});
             if (self.top_p <= 0 or self.top_p >= 1) {
                 @panic("Unimplemented");
             } else {

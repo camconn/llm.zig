@@ -16,7 +16,7 @@ const print_perf = false;
 const Config = llama.Config;
 const TransformerV1 = llama.TransformerV1;
 const Tokenizer = llama.Tokenizer;
-const Params = llama.Params;
+const Sampler = llama.Sampler;
 const State = llama.State;
 
 pub fn main() !void {
@@ -101,7 +101,7 @@ pub fn main() !void {
         try stdout.print("Token #{d} = {d: >8}; <<{s}>>\n", .{ i, tok, chars });
     }
 
-    var picker = Params.init(0.95, 0.9, config.vocab_size);
+    var picker = Sampler.init(0.95, 0.9, config.vocab_size);
 
     var n: usize = 0;
     var token: Tokenizer.Token = undefined;

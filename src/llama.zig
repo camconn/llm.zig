@@ -1411,12 +1411,12 @@ pub const TransformerV1 = struct {
     }
 };
 
-pub const Params = struct {
+pub const Sampler = struct {
     const Self = @This();
 
     temperature: f32,
     top_p: f32,
-    random: std.Random,
+    rng: std.Random.Xoroshiro128,
     vocab_size: usize,
 
     const Pair = struct {
@@ -1429,17 +1429,20 @@ pub const Params = struct {
         }
     };
 
-    pub fn init(temperature: f32, top_p: f32, vocab_size: usize) Params {
+    pub fn init(temperature: f32, top_p: f32, vocab_size: usize) Sampler {
         const now = std.time.milliTimestamp();
-        var rng = std.Random.Xoroshiro128.init(@bitCast(now));
+        const rng = std.Random.Xoroshiro128.init(@bitCast(now));
         return .{
             .temperature = temperature,
             .top_p = top_p,
-            .random = rng.random(),
+            .rng = rng,
             .vocab_size = vocab_size,
         };
     }
 
+    /// Greedily or stochastically sample the next token given a set of token probabilities
+    /// (or *logits*) depending on how this sampler was called when `init()`.
+    /// If `temperature == 0` then greedily sample, otherwise do nucleus sampling.
     pub fn sample(self: *Self, probs: []f32, allocator: Allocator) !Tokenizer.Token {
         var next: Tokenizer.Token = undefined;
         if (self.temperature == 0) {
@@ -1452,7 +1455,8 @@ pub const Params = struct {
             }
             math.softMax(probs);
 
-            const random = self.random.float(f32);
+            const random = self.rng.random().float(f32);
+            std.debug.print("random: {d}\n", .{random});
             if (self.top_p <= 0 or self.top_p >= 1) {
                 @panic("Unimplemented");
             } else {
@@ -1464,6 +1468,8 @@ pub const Params = struct {
         return next;
     }
 
+    /// Implement Nucleus Sampling as described in The Curious Case of Neural Text Degeneration [1].
+    /// [1]: https://arxiv.org/abs/1904.09751
     fn sample_nucleus(self: *Self, probs: []f32, random: f32, alloc: Allocator) !Tokenizer.Token {
         var tokens = try alloc.alloc(Pair, self.vocab_size);
         for (0..self.vocab_size, probs) |i, p| {

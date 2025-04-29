@@ -10,13 +10,13 @@
 const std = @import("std");
 
 const llm = @import("root.zig");
-const tokenizer = llm.tokenizer;
+const token = llm.token;
 const math = llm.math;
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-const Tokenizer = tokenizer.Tokenizer;
+const Tokenizer = token.Tokenizer;
 const Token = Tokenizer.Token;
 
 pub const Sampler = struct {
@@ -89,8 +89,8 @@ pub const Sampler = struct {
         // Find the first `last_idx` tokens which have a sum >= `self.top_p`
         var sum: f32 = 0;
         var last_idx = self.vocab_size;
-        for (0..last_idx, tokens) |i, token| {
-            sum += token.f;
+        for (0..last_idx, tokens) |i, tok| {
+            sum += tok.f;
             if (sum >= self.top_p) {
                 last_idx = i + 1;
                 break;
@@ -104,10 +104,10 @@ pub const Sampler = struct {
         //      r ∈ [0, ~top_p]
         const r = random * sum;
         var cdf: f32 = 0;
-        for (tokens[0..last_idx]) |token| {
-            cdf += token.f;
+        for (tokens[0..last_idx]) |tok| {
+            cdf += tok.f;
             if (r < cdf) {
-                return token.t;
+                return tok.t;
             }
         }
 

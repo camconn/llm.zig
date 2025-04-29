@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // © 2025 Cameron Conn
 
-//! tokenizer: Tokenizer algorithms and utilities
+//! token: Tokenization algorithms and utilities
 //! This module contains tools for converting text to and from tokens that models understand.
 
 const std = @import("std");
@@ -23,7 +23,7 @@ pub const Tokenizer = struct {
     /// A single Token's ID. Represents one of 32000 vocab value or a sentinel token.
     /// Note that a padding token == -1, hence the signed-ness.
     pub const Token = i16;
-    const TokenEntry = struct {
+    pub const TokenEntry = struct {
         score: f32,
         id: Token,
         chars: []u8,
@@ -235,7 +235,7 @@ pub const Tokenizer = struct {
     // TODO: Derive these from the read tokenizer file instead of statically defining them.
     const UNK = 0;
     pub const BOS = 1;
-    const EOS = 2;
+    pub const EOS = 2;
     const PAD = -1;
 
     const UNK_PIECE = "<unk>";
@@ -406,9 +406,17 @@ pub const Tokenizer = struct {
     }
 
     /// Find a token by its index in `tokens`.
-    pub fn findIndexByTokenId(self: Self, token: Token) ?usize {
+    fn findIndexByTokenId(self: Self, token: Token) ?usize {
         // TODO: find a better path to make this private
         return self.token_to_idx[@intCast(token)];
+    }
+
+    /// Get the token entry for the given token.
+    pub fn getTokenChars(self: Self, tok: Token) ?[]const u8 {
+        if (self.findIndexByTokenId(tok)) |idx| {
+            return self.tokens.items(.chars)[idx];
+        }
+        return null;
     }
 };
 

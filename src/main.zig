@@ -15,7 +15,7 @@ const print_perf = false;
 
 const Config = llama.Config;
 const TransformerV1 = llama.TransformerV1;
-const Tokenizer = llm.tokenizer.Tokenizer;
+const Tokenizer = llm.token.Tokenizer;
 const Sampler = llm.sample.Sampler;
 const State = llama.State;
 
@@ -101,10 +101,8 @@ pub fn main() !void {
     if (debug_mode) try stdout.print("Got {d} encoded tokens\n", .{tokens.len});
 
     if (debug_mode) {
-        const chars_list = tokenizer.tokens.items(.chars);
         for (0.., tokens) |i, tok| {
-            const idx = tokenizer.findIndexByTokenId(tok).?;
-            const chars = chars_list[idx];
+            const chars = tokenizer.getTokenChars(tok).?;
             try stdout.print("Token #{d} = {d: >8}; <<{s}>>\n", .{ i, tok, chars });
         }
     }
@@ -130,7 +128,7 @@ fn run_inference(
     defer if (progress) |prog| prog.end();
 
     var n: usize = 0;
-    var token: Tokenizer.Token = undefined;
+    var tok: Tokenizer.Token = undefined;
     const config = transformer.config;
     var picker = Sampler.init(0.95, 0.9, config.vocab_size);
 
@@ -141,11 +139,13 @@ fn run_inference(
         const in_prompt = n < prompt.len;
         if (in_prompt) {
             // Feed next token in prompt
-            token = prompt[n];
+            tok = prompt[n];
         }
 
-        const out = transformer.forward(state, token, n, progress);
+        const input = tokenizer.getTokenChars(tok).?;
+        const out = transformer.forward(state, tok, n, progress);
         const decoded = try picker.sample(out, allocator);
+        const predicted = tokenizer.getTokenChars(decoded).?;
 
         if (comptime print_perf) {
             const now = try std.time.Instant.now();
@@ -157,20 +157,26 @@ fn run_inference(
             });
         }
 
-        const idx_in = tokenizer.findIndexByTokenId(token).?;
-        const chars_in = tokenizer.tokens.items(.chars)[idx_in];
-
-        const idx = tokenizer.findIndexByTokenId(decoded).?;
-        const chars = tokenizer.tokens.items(.chars)[idx];
-
         if (debug_mode) {
-            try stdout.print("In: {d} <<{s}>>; Out: {d} <<{s}>>\n", .{ token, chars_in, decoded, chars });
-        } else if (in_prompt and token != Tokenizer.BOS) {
-            try stdout.print("{s}", .{chars_in});
+            try stdout.print("In: {d} <<{s}>>; Out: {d} <<{s}>>\n", .{ tok, input, decoded, predicted });
+        } else if (in_prompt) {
+            // Don't print BOS at start of output.
+            if (n != 0 and tok != Tokenizer.BOS) {
+                try stdout.print("{s}", .{input});
+            }
+            // If the next token is a prediction, go ahead and print out the prediction.
+            if (n + 1 == prompt.len) {
+                try stdout.print("{s}", .{predicted});
+            }
         } else {
-            try stdout.print("{s}", .{chars});
+            if (decoded != Tokenizer.EOS) {
+                try stdout.print("{s}", .{predicted});
+            }
         }
-        token = decoded;
+        tok = decoded;
+
+        // End of output
+        if (tok == Tokenizer.EOS) break;
     }
 }
 
@@ -199,6 +205,5 @@ fn load_llama2(tokenizer_path: []const u8, model_path: []const u8, alloc: std.me
         .transformer = transformer,
         .tokenizer = tokenizer,
         .state = state,
-        //.file = null,
     };
 }

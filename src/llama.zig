@@ -12,11 +12,12 @@ const std = @import("std");
 const llm = @import("root.zig");
 const ggml = llm.ggml;
 const math = llm.math;
+const token = llm.token;
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-const Tokenizer = llm.tokenizer.Tokenizer;
+const Tokenizer = token.Tokenizer;
 const Token = Tokenizer.Token;
 
 const Weights = math.Weights;
@@ -664,11 +665,11 @@ pub const TransformerV1 = struct {
     }
 
     /// Calculate a forward pass of the transformer with the next token `token` at
-    /// position `n_token`.
+    /// position `n_tok`.
     ///
     /// Returns a slice of logits from calculation. Caller **does not** down the returned
     /// slice and should not attempt to free it.
-    pub fn forward(self: Self, state: *State, token: Tokenizer.Token, n_token: usize, progress: ?std.Progress.Node) []f32 {
+    pub fn forward(self: Self, state: *State, tok: Tokenizer.Token, n_tok: usize, progress: ?std.Progress.Node) []f32 {
         // Get a considerable speedup for operations that occur within here.
         @setFloatMode(.optimized);
 
@@ -679,7 +680,7 @@ pub const TransformerV1 = struct {
         //const kv_mul = c.n_heads / c.n_kv_heads;
         const head_size = c.dim / c.n_heads;
 
-        self.applyTokenEmbedding(state.input, token);
+        self.applyTokenEmbedding(state.input, tok);
 
         var layer_progress: ?std.Progress.Node = null;
         if (progress) |prog| {
@@ -783,13 +784,13 @@ pub const TransformerV1 = struct {
             //     xq, xk = apply_rotary_emb(xq, xk, freq_cs, freq_ss)
             //
             // Apply RoPE embeddings on `q` over `dim` and `k` over `kv_dim`.
-            apply_rope_embeddings(state.q, state.sin, state.cos, c.n_heads, head_size, n_token);
-            apply_rope_embeddings(state.k, state.sin, state.cos, c.n_kv_heads, head_size, n_token);
+            apply_rope_embeddings(state.q, state.sin, state.cos, c.n_heads, head_size, n_tok);
+            apply_rope_embeddings(state.k, state.sin, state.cos, c.n_kv_heads, head_size, n_tok);
 
             {
                 // Update kv cache
                 std.debug.assert(dim == kv_dim);
-                const cache_start = layer_offset + n_token * kv_dim;
+                const cache_start = layer_offset + n_tok * kv_dim;
                 const cache_key_vec = state.k_cache[cache_start .. cache_start + kv_dim];
                 const cache_val_vec = state.v_cache[cache_start .. cache_start + kv_dim];
                 @memcpy(cache_key_vec, state.k);
@@ -799,7 +800,7 @@ pub const TransformerV1 = struct {
             // Inputs are state.q, state.k, state.v
             // Output is in state.work
             // Everything else can be mangled
-            self.attention(state, i, n_token);
+            self.attention(state, i, n_tok);
             // Output of multi-head attention is now in `state.work`.
 
             // Almost done w/ Attention.forward(x), we just need to calculate the return
@@ -886,9 +887,9 @@ pub const TransformerV1 = struct {
     }
 
     /// Apply and copy token embeddings for the current input `token` into the `out` vector.
-    fn applyTokenEmbedding(self: Self, out: []f32, token: Tokenizer.Token) void {
+    fn applyTokenEmbedding(self: Self, out: []f32, tok: Tokenizer.Token) void {
         const dim = self.config.dim;
-        const token_offset: usize = @as(usize, @intCast(token)) * dim;
+        const token_offset: usize = @as(usize, @intCast(tok)) * dim;
 
         switch (self.token_embed) {
             .f32 => |floats| {

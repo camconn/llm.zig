@@ -12,7 +12,7 @@ pub const ggml = @import("ggml.zig");
 pub const llama = @import("llama.zig");
 pub const math = @import("math.zig");
 pub const sample = @import("sample.zig");
-pub const tokenizer = @import("tokenizer.zig");
+pub const token = @import("token.zig");
 
 test "Top level test reference" {
     const std = @import("std");

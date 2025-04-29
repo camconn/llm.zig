@@ -344,6 +344,7 @@ pub const Tokenizer = struct {
         self.arena.deinit();
     }
 
+    // TODO: Derive these from the read tokenizer file instead of statically defining them.
     const UNK = 0;
     const BOS = 1;
     const EOS = 2;
@@ -368,6 +369,7 @@ pub const Tokenizer = struct {
         // Make a heuristic guess about how long our tokenized sequence will be
         var output_final = std.ArrayList(Token).init(alloc);
         try output_final.ensureTotalCapacity(text.len >> 2);
+        try output_final.append(BOS);
 
         const slice = self.tokens.slice();
         const chars = slice.items(.chars);
@@ -530,7 +532,7 @@ test "Tokenizer.encode" {
 
     {
         const sample = "Hello, world! How are you today?";
-        const ids = [_]Tokenizer.Token{ 15043, 29892, 3186, 29991, 1128, 526, 366, 9826, 29973 };
+        const ids = [_]Tokenizer.Token{ 1, 15043, 29892, 3186, 29991, 1128, 526, 366, 9826, 29973 };
 
         const tokens = try tokenizer.encode(sample, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
@@ -539,8 +541,8 @@ test "Tokenizer.encode" {
     }
 
     {
-        const sample = "Hello\nworld"; // TODO: Handle issue w/ leading spaces
-        const ids = [_]Tokenizer.Token{ 15043, 13, 11526 };
+        const sample = "Hello\nworld";
+        const ids = [_]Tokenizer.Token{ 1, 15043, 13, 11526 };
 
         const tokens = try tokenizer.encode(sample, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
@@ -552,6 +554,7 @@ test "Tokenizer.encode" {
         const sample = "Byte pair encoding[1][2] (also known as BPE, or digram";
         // zig fmt: off
         const ids = [_]Tokenizer.Token{
+            1,
             19831, 5101, 8025, 29961, 29896, 3816, 29906, 29962,
             313, 15189, 2998, 408, 350, 4162, 29892, 470,
             4697, 2572

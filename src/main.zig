@@ -165,7 +165,7 @@ fn run_inference(
 
         if (debug_mode) {
             try stdout.print("In: {d} <<{s}>>; Out: {d} <<{s}>>\n", .{ token, chars_in, decoded, chars });
-        } else if (in_prompt) {
+        } else if (in_prompt and token != Tokenizer.BOS) {
             try stdout.print("{s}", .{chars_in});
         } else {
             try stdout.print("{s}", .{chars});

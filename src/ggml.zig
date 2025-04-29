@@ -512,11 +512,11 @@ pub const GGUFFile = struct {
 
         std.debug.print("Model architecture: {s}\n", .{arch});
         std.debug.print("Model name: {s}\n", .{name});
-        std.debug.print("desired alignment: {d}; quantization: {d}\n", .{ alignment, quantization });
+        std.debug.print("Quantization version: {d}\n", .{quantization});
 
         const file_offset: usize = @intCast(try reader.context.getPos());
         const aligned = std.mem.alignForward(usize, file_offset, alignment);
-        std.debug.print("Aligning from {d} to {d}\n", .{ file_offset, aligned });
+        //std.debug.print("Aligning from {d} to {d}\n", .{ file_offset, aligned });
 
         const tensor_data_offset = aligned;
         //std.debug.print("Tensor_data starts at addr {d}, offset {d}\n", .{ tensor_data_offset, aligned });

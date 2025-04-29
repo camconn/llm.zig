@@ -918,6 +918,7 @@ pub const TransformerV1 = struct {
         const kv_dim = (c.dim * c.n_kv_heads) / c.n_heads;
         const kv_mul = c.n_heads / c.n_kv_heads;
         const layer_offset = layer * c.max_seq_length * kv_dim;
+        const attention_scale = std.math.sqrt(@as(f32, @floatFromInt(head_size)));
 
         // Perform multi-head attention over all heads
         for (0..c.n_heads) |head| {
@@ -935,11 +936,11 @@ pub const TransformerV1 = struct {
                 const key = state.k_cache[base + tok * kv_dim ..][0..head_size];
 
                 const qk = math.dotProduct(query, key);
-                const inner = qk / std.math.sqrt(@as(f32, @floatFromInt(head_size)));
+                const inner = qk / attention_scale;
                 att[tok] = inner;
             }
 
-            // Calculate softmax(QK^T/sqrt(d_k)
+            // Calculate softmax(QK^T/sqrt(d_k))
             math.softMax(att);
 
             // We now have the softmax(QK^T/sqrt(d_k)).

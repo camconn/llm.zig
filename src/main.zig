@@ -15,8 +15,8 @@ const print_perf = false;
 
 const Config = llama.Config;
 const TransformerV1 = llama.TransformerV1;
-const Tokenizer = llama.Tokenizer;
-const Sampler = llama.Sampler;
+const Tokenizer = llm.tokenizer.Tokenizer;
+const Sampler = llm.sample.Sampler;
 const State = llama.State;
 
 pub fn main() !void {

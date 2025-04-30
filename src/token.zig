@@ -16,8 +16,6 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 
 /// Implementation of the SentencePiece tokenizer.
 pub const Tokenizer = struct {
-    // TODO: Read the original `sentencepiece.sentencepice_model_pb.ModelProto()` file instead
-    //       to read original/custom `.model` files.
     const Self = @This();
 
     /// A single Token's ID. Represents one of 32000 vocab value or a sentinel token.
@@ -38,7 +36,7 @@ pub const Tokenizer = struct {
     // Surrogate whitespace character used by Sentencepiece for spaces.
     const whitespace_string = "▁"; // "\xe2\x96\x81";
 
-    pub fn init(file_path: []const u8, alloc: Allocator, vocab_size: usize) !Tokenizer {
+    pub fn initV1(file_path: []const u8, vocab_size: usize, alloc: Allocator) !Tokenizer {
         // First try to load the model with relative and then fallback to absolute path if that fails.
         const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
         const cwd = std.fs.cwd();
@@ -56,7 +54,7 @@ pub const Tokenizer = struct {
         defer file.?.close();
 
         var buffer = std.io.bufferedReader(file.?.reader());
-        return try Tokenizer.read(buffer.reader(), alloc, vocab_size);
+        return try Tokenizer.read(buffer.reader(), vocab_size, alloc);
     }
 
     const Sorter = struct {
@@ -74,7 +72,7 @@ pub const Tokenizer = struct {
     /// Read an exported Tokenizer model as exported by `llama2.c/tokenizer.py`
     /// Any scores and bytes read will be allocated with the supplied `Allocator` and only
     /// be freed after calling `deinit()`.
-    fn read(reader: anytype, allocator: Allocator, vocab_size: usize) !Tokenizer {
+    fn read(reader: anytype, vocab_size: usize, allocator: Allocator) !Tokenizer {
         // Read a tokenizer file as written from Karpathy's `llama2.c`
         // According to `tokenizer.py`, the format is:
         //
@@ -227,6 +225,8 @@ pub const Tokenizer = struct {
         }
     }
 
+    /// Free up any resources associated with this `Tokenizer` and invalidate any pointers to
+    /// token strings or token entries.
     pub fn deinit(self: *Self) void {
         self.tokens.deinit(self.arena.allocator());
         self.arena.deinit();
@@ -423,7 +423,7 @@ pub const Tokenizer = struct {
 test "Tokenizer.encode" {
     const tok_path = try std.testing.allocator.dupe(u8, "tokenizer.bin");
     defer std.testing.allocator.free(tok_path);
-    var tokenizer = try Tokenizer.init(tok_path, std.testing.allocator, 32000);
+    var tokenizer = try Tokenizer.initV1(tok_path, 32000, std.testing.allocator);
     defer tokenizer.deinit();
 
     {

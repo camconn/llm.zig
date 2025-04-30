@@ -188,7 +188,7 @@ fn load_llama2(tokenizer_path: []const u8, model_path: []const u8, alloc: std.me
 
     try stdout.print("loaded config\n", .{});
 
-    var tokenizer = try Tokenizer.init(tokenizer_path, alloc, config.vocab_size);
+    var tokenizer = try Tokenizer.initV1(tokenizer_path, config.vocab_size, alloc);
     errdefer tokenizer.deinit();
     try stdout.print("Loaded tokenizer; max length: {d}\n", .{tokenizer.max_len});
 

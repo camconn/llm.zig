@@ -19,12 +19,13 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 /// between models.
 pub const Token = i32;
 
+const tokenizer_key = "tokenizer.ggml.model";
+
 /// Implementation of the SentencePiece tokenizer.
 pub const SPTokenizer = struct {
     const Self = @This();
 
-    /// A single Token's ID. Represents one of 32000 vocab value or a sentinel token.
-    /// Note that a padding token == -1, hence the signed-ness.
+    /// A SentencePiece Token Entry.
     pub const TokenEntry = struct {
         score: f32,
         id: Token,
@@ -505,3 +506,433 @@ const tiktoken_gpt =
 const tiktoken_gpt2_fast =
     \\'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s
 ;
+
+/// Helper reference for codepoints in the base BPE setup.
+const codepoints: [1024]u8 = cc: {
+    var buf: [1024]u8 = undefined;
+    for (0..512) |i| {
+        buf[2 * i] = i / 256;
+        buf[2 * i + 1] = @truncate(i);
+    }
+    break :cc buf;
+};
+
+/// Map a u16 codepoint to string.
+fn get_codepoint_str(value: u16) []const u8 {
+    std.debug.assert(value < 512);
+    if (value < 256) {
+        const idx = 2 * value + 1;
+        return codepoints[idx .. idx + 1];
+    }
+
+    const start = 2 * value;
+    const stop = start + 2;
+    return codepoints[start..stop];
+}
+
+test "codepoint helper" {
+    for (0..512) |i| {
+        const actual = get_codepoint_str(@intCast(i));
+        var expanded: usize = 0;
+        if (i < 256) {
+            try std.testing.expectEqual(actual.len, 1);
+            expanded = actual[0];
+        } else {
+            try std.testing.expectEqual(actual.len, 2);
+            const fst: usize = actual[0];
+            const snd: usize = actual[1];
+
+            expanded = fst * 256 + snd;
+        }
+
+        try std.testing.expectEqual(i, expanded);
+    }
+}
+
+// Compare to `data_gym_to_mergeable_bpe_ranks` in `load.py`
+/// Temporary helper used for constructing base `tiktoken` mappings.
+const rank_to_intbytes = [_]u8{
+    33,  34,  35,  36,  37,  38,  39,  40,
+    41,  42,  43,  44,  45,  46,  47,  48,
+    49,  50,  51,  52,  53,  54,  55,  56,
+    57,  58,  59,  60,  61,  62,  63,  64,
+    65,  66,  67,  68,  69,  70,  71,  72,
+    73,  74,  75,  76,  77,  78,  79,  80,
+    81,  82,  83,  84,  85,  86,  87,  88,
+    89,  90,  91,  92,  93,  94,  95,  96,
+    97,  98,  99,  100, 101, 102, 103, 104,
+    105, 106, 107, 108, 109, 110, 111, 112,
+    113, 114, 115, 116, 117, 118, 119, 120,
+    121, 122, 123, 124, 125, 126, 161, 162,
+    163, 164, 165, 166, 167, 168, 169, 170,
+    171, 172, 174, 175, 176, 177, 178, 179,
+    180, 181, 182, 183, 184, 185, 186, 187,
+    188, 189, 190, 191, 192, 193, 194, 195,
+    196, 197, 198, 199, 200, 201, 202, 203,
+    204, 205, 206, 207, 208, 209, 210, 211,
+    212, 213, 214, 215, 216, 217, 218, 219,
+    220, 221, 222, 223, 224, 225, 226, 227,
+    228, 229, 230, 231, 232, 233, 234, 235,
+    236, 237, 238, 239, 240, 241, 242, 243,
+    244, 245, 246, 247, 248, 249, 250, 251,
+    252, 253, 254, 255, 0,   1,   2,   3,
+    4,   5,   6,   7,   8,   9,   10,  11,
+    12,  13,  14,  15,  16,  17,  18,  19,
+    20,  21,  22,  23,  24,  25,  26,  27,
+    28,  29,  30,  31,  32,  127, 128, 129,
+    130, 131, 132, 133, 134, 135, 136, 137,
+    138, 139, 140, 141, 142, 143, 144, 145,
+    146, 147, 148, 149, 150, 151, 152, 153,
+    154, 155, 156, 157, 158, 159, 160, 173,
+};
+
+/// Mapping of codepoint (index) to the actual rank for a byte.
+/// Equivalent-ish version of lookup table for `data_gym_byte_to_byte` in tiktoken.
+const byte_to_bytes = cc: {
+    var buf = [_]u16{0} ** 324;
+    // flattened: list(sorted([(ord(x), y) for (x, y) in data_gym_byte_to_byte.items()]))
+    const pairs = [_]u16{
+        33,  33,  34,  34,  35,  35,  36,  36,  37,  37,  38,  38,  39,  39,  40,  40,
+        41,  41,  42,  42,  43,  43,  44,  44,  45,  45,  46,  46,  47,  47,  48,  48,
+        49,  49,  50,  50,  51,  51,  52,  52,  53,  53,  54,  54,  55,  55,  56,  56,
+        57,  57,  58,  58,  59,  59,  60,  60,  61,  61,  62,  62,  63,  63,  64,  64,
+        65,  65,  66,  66,  67,  67,  68,  68,  69,  69,  70,  70,  71,  71,  72,  72,
+        73,  73,  74,  74,  75,  75,  76,  76,  77,  77,  78,  78,  79,  79,  80,  80,
+        81,  81,  82,  82,  83,  83,  84,  84,  85,  85,  86,  86,  87,  87,  88,  88,
+        89,  89,  90,  90,  91,  91,  92,  92,  93,  93,  94,  94,  95,  95,  96,  96,
+        97,  97,  98,  98,  99,  99,  100, 100, 101, 101, 102, 102, 103, 103, 104, 104,
+        105, 105, 106, 106, 107, 107, 108, 108, 109, 109, 110, 110, 111, 111, 112, 112,
+        113, 113, 114, 114, 115, 115, 116, 116, 117, 117, 118, 118, 119, 119, 120, 120,
+        121, 121, 122, 122, 123, 123, 124, 124, 125, 125, 126, 126, 161, 161, 162, 162,
+        163, 163, 164, 164, 165, 165, 166, 166, 167, 167, 168, 168, 169, 169, 170, 170,
+        171, 171, 172, 172, 174, 174, 175, 175, 176, 176, 177, 177, 178, 178, 179, 179,
+        180, 180, 181, 181, 182, 182, 183, 183, 184, 184, 185, 185, 186, 186, 187, 187,
+        188, 188, 189, 189, 190, 190, 191, 191, 192, 192, 193, 193, 194, 194, 195, 195,
+        196, 196, 197, 197, 198, 198, 199, 199, 200, 200, 201, 201, 202, 202, 203, 203,
+        204, 204, 205, 205, 206, 206, 207, 207, 208, 208, 209, 209, 210, 210, 211, 211,
+        212, 212, 213, 213, 214, 214, 215, 215, 216, 216, 217, 217, 218, 218, 219, 219,
+        220, 220, 221, 221, 222, 222, 223, 223, 224, 224, 225, 225, 226, 226, 227, 227,
+        228, 228, 229, 229, 230, 230, 231, 231, 232, 232, 233, 233, 234, 234, 235, 235,
+        236, 236, 237, 237, 238, 238, 239, 239, 240, 240, 241, 241, 242, 242, 243, 243,
+        244, 244, 245, 245, 246, 246, 247, 247, 248, 248, 249, 249, 250, 250, 251, 251,
+        252, 252, 253, 253, 254, 254, 255, 255, 256, 0,   257, 1,   258, 2,   259, 3,
+        260, 4,   261, 5,   262, 6,   263, 7,   264, 8,   265, 9,   266, 10,  267, 11,
+        268, 12,  269, 13,  270, 14,  271, 15,  272, 16,  273, 17,  274, 18,  275, 19,
+        276, 20,  277, 21,  278, 22,  279, 23,  280, 24,  281, 25,  282, 26,  283, 27,
+        284, 28,  285, 29,  286, 30,  287, 31,  288, 32,  289, 127, 290, 128, 291, 129,
+        292, 130, 293, 131, 294, 132, 295, 133, 296, 134, 297, 135, 298, 136, 299, 137,
+        300, 138, 301, 139, 302, 140, 303, 141, 304, 142, 305, 143, 306, 144, 307, 145,
+        308, 146, 309, 147, 310, 148, 311, 149, 312, 150, 313, 151, 314, 152, 315, 153,
+        316, 154, 317, 155, 318, 156, 319, 157, 320, 158, 321, 159, 322, 160, 323, 173,
+    };
+    var i: usize = 0;
+    while (i < pairs.len) : (i += 2) {
+        const key = pairs[i];
+        const val = pairs[i + 1];
+
+        buf[@intCast(key)] = val;
+    }
+    break :cc buf;
+};
+
+/// Analogous to the inline function `decode_data_gym` in tiktoken's `load.py`
+/// This maps a string to an array of u16 ranks and returns them.
+/// Caller is responsible for freeing returned memory.
+fn decode_data_gym(str: []const u8, allocator: std.mem.Allocator) ![]u16 {
+    const out = try allocator.alloc(u16, str.len);
+    errdefer allocator.free(out);
+
+    var iter = std.unicode.Utf8Iterator{
+        .bytes = str,
+        .i = 0,
+    };
+
+    var i: usize = 0;
+    while (iter.nextCodepoint()) |point| {
+        const trunc: usize = @intCast(point);
+        std.debug.assert(trunc < byte_to_bytes.len);
+
+        const mapped = byte_to_bytes[trunc];
+
+        out[i] = mapped;
+        i += 1;
+    }
+
+    return out[0..i];
+}
+
+test "tiktoken decode_data_gym" {
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const decoded_hello = try decode_data_gym("hello", alloc);
+    const expected_hello = [_]u16{ 104, 101, 108, 108, 111 };
+    try std.testing.expectEqualSlices(u16, &expected_hello, decoded_hello);
+
+    const decoded_world = try decode_data_gym("Ġworld", alloc);
+    const expected_world = [_]u16{ 32, 119, 111, 114, 108, 100 };
+    try std.testing.expectEqualSlices(u16, &expected_world, decoded_world);
+
+    const decoded_zig = try decode_data_gym("lang.zig123456", alloc);
+    const expected_zig = [_]u16{ 108, 97, 110, 103, 46, 122, 105, 103, 49, 50, 51, 52, 53, 54 };
+    try std.testing.expectEqualSlices(u16, &expected_zig, decoded_zig);
+}
+
+/// Implementation of the `tiktoken` BPE Tokenizer.
+pub const TikTokenizer = struct {
+    const Self = @This();
+
+    const context_len_keys: [2][]const u8 = .{
+        "gpt2.context_length",
+        "qwen3.context_length",
+    };
+    const SPACE = "Ġ";
+
+    pub const TokenEntry = struct {
+        score: f32,
+        id: Token,
+        chars: []u8,
+    };
+
+    const Ranks = std.StringHashMap(u64);
+    tokens: Ranks,
+    arena: ArenaAllocator,
+
+    /// Read and initialize a `TikTokenizer` instance from the provided `file` using the given
+    /// `allocator`.
+    pub fn init(file: ggml.GGUFFile, allocator: Allocator) !TikTokenizer {
+        const tokenizer_model = file.getValue(tokenizer_key).?.string;
+        if (!std.mem.eql(u8, tokenizer_model.str, "gpt2")) {
+            std.debug.print("Found non-GPT tokenizer model: {s}\n", .{tokenizer_model.str});
+            return error.WrongTokenizer;
+        }
+
+        var found_context_len: bool = false;
+        var context_len: u32 = undefined;
+        for (context_len_keys) |key| {
+            if (file.getValue(key)) |len| {
+                found_context_len = true;
+                switch (len) {
+                    .uint32 => |l| context_len = l,
+                    else => {
+                        std.debug.print("Found context len in {s}, but it had wrong type\n", .{key});
+                        return error.Tokenizer;
+                    },
+                }
+            }
+        }
+        if (!found_context_len) {
+            std.debug.print("Could not find context length for Tokenizer\n", .{});
+            return error.Tokenizer;
+        }
+
+        const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
+        const token_types = file.getValue("tokenizer.ggml.token_type").?.array;
+        const token_merges = file.getValue("tokenizer.ggml.merges").?.array;
+        // The vocabulary size is equivalent to the length of the tokens array.
+        const vocab_size = token_chars.len;
+        std.debug.print("vocab size: {d}\n", .{vocab_size});
+
+        std.debug.print("types: {d}; merges {d}\n", .{ token_types.len, token_merges.len });
+
+        const bos = file.getValue("tokenizer.ggml.bos_token_id").?.uint32;
+        const eos = file.getValue("tokenizer.ggml.eos_token_id").?.uint32;
+        //const padding = file.getValue("tokenizer.ggml.padding_token_id").?.uint32;
+        var add_bos: bool = false;
+        if (file.getValue("tokenizer.ggml.add_bos_token")) |val| {
+            // TODO: Assert on type
+            add_bos = val.boolean;
+        }
+
+        std.debug.print("bos {d} eos {d}\n", .{ bos, eos });
+
+        var arena = ArenaAllocator.init(allocator);
+        // TODO: errdefer, not defer
+        defer arena.deinit();
+        //const alloc = arena.allocator();
+
+        //var tokens = Storage{};
+        //try tokens.ensureTotalCapacity(alloc, vocab_size + 10); // add 10 size for safety.
+
+        @panic("Read stuff from file");
+
+        // Copy the Area after all of the copies have been done, otherwise there will be
+        // a leak from the Arena's allocations.
+        // Same with Token Storage
+    }
+
+    /// Load a TikToken BPE file and encoder JSON file into an actual set of ranks.
+    fn loadDataToBPERanks(
+        bpe_reader: anytype,
+        encoder_reader: anytype,
+        allocator: std.mem.Allocator,
+        //bpe_hash: ?[]const u8,
+        //encoder_hash: ?[]const u8,
+    ) !TikTokenizer {
+        var arena = ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
+        const alloc = arena.allocator();
+
+        // Parse `vocab.bpe` or similar file.
+        // 128 is too small apparently
+        const line_buf = try alloc.alloc(u8, 512);
+        defer alloc.free(line_buf);
+
+        // skip version line
+        // TODO: Handle version line differences
+        _ = try bpe_reader.readUntilDelimiter(line_buf, '\n');
+
+        // TODO: Create hashset
+        var ranks = Ranks.init(alloc);
+        errdefer ranks.deinit();
+
+        // {bytes([b]): i for i, b in enumerate(rank_to_intbyte)}
+        for (0.., rank_to_intbytes) |i, b| {
+            const key = get_codepoint_str(b);
+            try ranks.put(key, @intCast(i));
+        }
+
+        var lines: usize = 1;
+        var n: usize = ranks.count();
+        while (true) {
+            const line = bpe_reader.readUntilDelimiterOrEof(line_buf, '\n') catch line_buf[0..0];
+            if (line) |ln| {
+                if (ln.len == 0) {
+                    std.debug.print("Somehow got a zero-length line. That's an error\n", .{});
+                    @panic("Read zero-length line");
+                }
+
+                // TODO: Parse line
+                var spliterator = std.mem.splitSequence(u8, ln, " ");
+                const lhs = spliterator.next().?;
+
+                const rhs = spliterator.next().?;
+                // Ensure there are only two entries per line
+                std.debug.assert(spliterator.next() == null);
+
+                const combined = try alloc.alloc(u8, lhs.len + rhs.len);
+                std.mem.copyForwards(u8, combined, lhs);
+                std.mem.copyForwards(u8, combined[lhs.len..], rhs);
+
+                try ranks.put(combined, n);
+
+                lines += 1;
+                n += 1;
+            } else {
+                //std.debug.print("think we reached the end of the file\n", .{});
+                break;
+            }
+        }
+        //std.debug.print("Read {d} entries from BPE file and set {d}\n", .{ lines, n });
+
+        var merge_arena = ArenaAllocator.init(alloc);
+        defer merge_arena.deinit();
+        const merge_alloc = merge_arena.allocator();
+
+        var merges = try readJsonMerges(encoder_reader, merge_alloc);
+        _ = merges.remove("<|endoftext|>");
+        _ = merges.remove("<|startoftext|>");
+
+        //std.debug.print("Decoded {d} merges from encoder.json\n", .{merges.count()});
+        //std.debug.print("Decoded {d} ranks from vocab.bpe\n", .{ranks.count()});
+        std.debug.assert(merges.count() == ranks.count());
+
+        return .{
+            .tokens = ranks,
+            .arena = arena,
+        };
+    }
+
+    /// Parse encoder.json
+    fn readJsonMerges(encoder_reader: anytype, alloc: std.mem.Allocator) !std.StringHashMap(usize) {
+        var json_reader = std.json.reader(alloc, encoder_reader);
+        defer json_reader.deinit();
+
+        const Merges = std.StringHashMap(usize);
+        var merges = Merges.init(alloc);
+        defer merges.deinit();
+
+        var last_key: ?[]const u8 = null;
+        while (true) {
+            const tok = try json_reader.nextAlloc(alloc, .alloc_always);
+            switch (tok) {
+                .object_begin, .object_end => {},
+                .end_of_document => {
+                    //std.debug.print("end_of_document\n", .{});
+                    break;
+                },
+                .allocated_string => |str| {
+                    if (last_key) |other| {
+                        std.debug.print("got string {s} but overwriting old {s}\n", .{ str, other });
+                        alloc.free(other);
+                    }
+
+                    last_key = str;
+                },
+                .allocated_number => |num| {
+                    defer alloc.free(num);
+                    if (last_key) |key| {
+                        const number = try std.fmt.parseInt(usize, num, 10);
+                        try merges.put(key, number);
+                        last_key = null;
+                    } else {
+                        std.debug.print("Got number {s} but there's no previous key\n", .{num});
+                    }
+                },
+                // zig fmt: off
+                .partial_number, .partial_string,
+                .partial_string_escaped_1, .partial_string_escaped_2,
+                .partial_string_escaped_3, .partial_string_escaped_4 => {
+                    std.debug.print("Got partial variant: {any}\n", .{tok});
+                    @panic("partial should never happen with .alloc_if_needed");
+                },
+                // zig fmt: on
+                else => {
+                    std.debug.print("Got unknown token variant: {any}\n", .{tok});
+                    @panic("Unknown variant");
+                },
+            }
+        }
+        return merges;
+    }
+
+    /// Free up any resources associated with this `Tokenizer` and invalidate any pointers to
+    /// token strings or token entries.
+    pub fn deinit(self: *Self) void {
+        self.tokens.deinit();
+        self.arena.deinit();
+    }
+
+    /// Encode text into a series of tokens.
+    /// Any slice returned will be allocated with `token_alloc`. The allocator used for
+    /// calling `init()` will not be used.
+    /// The caller is responsible for freeing the returned tokens from `token_alloc`.
+    pub fn encode(_: Self, _: []const u8, _: Allocator) ![]Token {
+        @panic("TODO");
+    }
+};
+
+pub fn main() !void {
+    const vocab_path = "vocab.bpe";
+    const encoder_path = "encoder.json";
+
+    std.debug.print("Opening {s} and {s} for BPE\n", .{ vocab_path, encoder_path });
+
+    const cwd = std.fs.cwd();
+
+    const vocab_file = try cwd.openFile(vocab_path, .{ .mode = .read_only });
+    defer vocab_file.close();
+    const encoder_file = try cwd.openFile(encoder_path, .{ .mode = .read_only });
+    defer encoder_file.close();
+
+    std.debug.print("Files opened successfully. Loading TikToken model\n", .{});
+
+    const vocab = vocab_file.reader();
+    const encoder = encoder_file.reader();
+
+    var tokenizer = try TikTokenizer.loadDataToBPERanks(vocab, encoder, std.heap.page_allocator);
+    defer tokenizer.deinit();
+
+    std.debug.print("Loaded TikTokenizer with {d} entries\n", .{tokenizer.tokens.count()});
+}

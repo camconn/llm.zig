@@ -15,7 +15,8 @@ const print_perf = false;
 
 const Config = llama.Config;
 const TransformerV1 = llama.TransformerV1;
-const Tokenizer = llm.token.Tokenizer;
+const SPTokenizer = llm.token.SPTokenizer;
+const Token = llm.token.Token;
 const Sampler = llm.sample.Sampler;
 const State = llama.State;
 
@@ -114,9 +115,9 @@ pub fn main() !void {
 
 fn run_inference(
     transformer: TransformerV1,
-    prompt: []Tokenizer.Token,
+    prompt: []Token,
     state: *State,
-    tokenizer: Tokenizer,
+    tokenizer: SPTokenizer,
     allocator: std.mem.Allocator,
     debug_mode: bool,
 ) !void {
@@ -128,7 +129,7 @@ fn run_inference(
     defer if (progress) |prog| prog.end();
 
     var n: usize = 0;
-    var tok: Tokenizer.Token = undefined;
+    var tok: Token = undefined;
     const config = transformer.config;
     var picker = Sampler.init(0.95, 0.9, config.vocab_size);
 
@@ -161,7 +162,7 @@ fn run_inference(
             try stdout.print("In: {d} <<{s}>>; Out: {d} <<{s}>>\n", .{ tok, input, decoded, predicted });
         } else if (in_prompt) {
             // Don't print BOS at start of output.
-            if (n != 0 and tok != Tokenizer.BOS) {
+            if (n != 0 and tok != SPTokenizer.BOS) {
                 try stdout.print("{s}", .{input});
             }
             // If the next token is a prediction, go ahead and print out the prediction.
@@ -169,14 +170,14 @@ fn run_inference(
                 try stdout.print("{s}", .{predicted});
             }
         } else {
-            if (decoded != Tokenizer.EOS) {
+            if (decoded != SPTokenizer.EOS) {
                 try stdout.print("{s}", .{predicted});
             }
         }
         tok = decoded;
 
         // End of output
-        if (tok == Tokenizer.EOS) break;
+        if (tok == SPTokenizer.EOS) break;
     }
 }
 
@@ -188,7 +189,7 @@ fn load_llama2(tokenizer_path: []const u8, model_path: []const u8, alloc: std.me
 
     try stdout.print("loaded config\n", .{});
 
-    var tokenizer = try Tokenizer.initV1(tokenizer_path, config.vocab_size, alloc);
+    var tokenizer = try SPTokenizer.initV1(tokenizer_path, config.vocab_size, alloc);
     errdefer tokenizer.deinit();
     try stdout.print("Loaded tokenizer; max length: {d}\n", .{tokenizer.max_len});
 

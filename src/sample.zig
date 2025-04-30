@@ -10,14 +10,12 @@
 const std = @import("std");
 
 const llm = @import("root.zig");
-const token = llm.token;
 const math = llm.math;
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-const Tokenizer = token.Tokenizer;
-const Token = Tokenizer.Token;
+const Token = llm.token.Token;
 
 pub const Sampler = struct {
     const Self = @This();
@@ -28,7 +26,7 @@ pub const Sampler = struct {
     vocab_size: usize,
 
     const Pair = struct {
-        t: Tokenizer.Token,
+        t: Token,
         f: f32,
 
         fn desc(_: void, lhs: Pair, rhs: Pair) bool {
@@ -51,8 +49,8 @@ pub const Sampler = struct {
     /// Greedily or stochastically sample the next token given a set of token probabilities
     /// (or *logits*) depending on how this sampler was called when `init()`.
     /// If `temperature == 0` then greedily sample, otherwise do nucleus sampling.
-    pub fn sample(self: *Self, probs: []f32, allocator: Allocator) !Tokenizer.Token {
-        var next: Tokenizer.Token = undefined;
+    pub fn sample(self: *Self, probs: []f32, allocator: Allocator) !Token {
+        var next: Token = undefined;
         if (self.temperature == 0) {
             const idx = std.sort.argMax(f32, probs, {}, std.sort.asc(f32)).?;
             next = @intCast(idx);
@@ -77,7 +75,7 @@ pub const Sampler = struct {
 
     /// Implement Nucleus Sampling as described in The Curious Case of Neural Text Degeneration [1].
     /// [1]: https://arxiv.org/abs/1904.09751
-    fn sample_nucleus(self: *Self, probs: []f32, random: f32, alloc: Allocator) !Tokenizer.Token {
+    fn sample_nucleus(self: *Self, probs: []f32, random: f32, alloc: Allocator) !Token {
         var tokens = try alloc.alloc(Pair, self.vocab_size);
         for (0..self.vocab_size, probs) |i, p| {
             tokens[i] = Pair{ .t = @intCast(i), .f = p };

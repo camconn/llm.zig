@@ -14,13 +14,17 @@ const ggml = @import("root.zig").ggml;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
+/// A single Token's ID. Represents one of the possible vocabulary tokens for a number of models.
+/// Note that invalid/padding tokens are < 0. Additionally, Tokens are not necessarily comparable
+/// between models.
+pub const Token = i32;
+
 /// Implementation of the SentencePiece tokenizer.
-pub const Tokenizer = struct {
+pub const SPTokenizer = struct {
     const Self = @This();
 
     /// A single Token's ID. Represents one of 32000 vocab value or a sentinel token.
     /// Note that a padding token == -1, hence the signed-ness.
-    pub const Token = i16;
     pub const TokenEntry = struct {
         score: f32,
         id: Token,
@@ -36,7 +40,7 @@ pub const Tokenizer = struct {
     // Surrogate whitespace character used by Sentencepiece for spaces.
     const whitespace_string = "▁"; // "\xe2\x96\x81";
 
-    pub fn initV1(file_path: []const u8, vocab_size: usize, alloc: Allocator) !Tokenizer {
+    pub fn initV1(file_path: []const u8, vocab_size: usize, alloc: Allocator) !SPTokenizer {
         // First try to load the model with relative and then fallback to absolute path if that fails.
         const options: std.fs.File.OpenFlags = .{ .mode = .read_only };
         const cwd = std.fs.cwd();
@@ -54,7 +58,7 @@ pub const Tokenizer = struct {
         defer file.?.close();
 
         var buffer = std.io.bufferedReader(file.?.reader());
-        return try Tokenizer.read(buffer.reader(), vocab_size, alloc);
+        return try SPTokenizer.read(buffer.reader(), vocab_size, alloc);
     }
 
     const Sorter = struct {
@@ -72,7 +76,7 @@ pub const Tokenizer = struct {
     /// Read an exported Tokenizer model as exported by `llama2.c/tokenizer.py`
     /// Any scores and bytes read will be allocated with the supplied `Allocator` and only
     /// be freed after calling `deinit()`.
-    fn read(reader: anytype, vocab_size: usize, allocator: Allocator) !Tokenizer {
+    fn read(reader: anytype, vocab_size: usize, allocator: Allocator) !SPTokenizer {
         // Read a tokenizer file as written from Karpathy's `llama2.c`
         // According to `tokenizer.py`, the format is:
         //
@@ -141,7 +145,7 @@ pub const Tokenizer = struct {
         };
     }
 
-    pub fn initGGUF(file: ggml.GGUFFile, allocator: Allocator) !Tokenizer {
+    pub fn initGGUF(file: ggml.GGUFFile, allocator: Allocator) !SPTokenizer {
         const context_len = file.getValue("llama.context_length").?.uint32;
 
         const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
@@ -177,7 +181,7 @@ pub const Tokenizer = struct {
             // NB: Entries of index [3,256+3) are encoded in some special fashion for their raw
             // bytes. These values are encoded like `<0xZZ>` where `ZZ` is the token's character
             // value in hexadecimal.
-            const token = Tokenizer.TokenEntry{
+            const token = TokenEntry{
                 .score = score,
                 .chars = to_use,
                 .id = @intCast(i),
@@ -420,36 +424,36 @@ pub const Tokenizer = struct {
     }
 };
 
-test "Tokenizer.encode" {
+test "SPTokenizer.encode" {
     const tok_path = try std.testing.allocator.dupe(u8, "tokenizer.bin");
     defer std.testing.allocator.free(tok_path);
-    var tokenizer = try Tokenizer.initV1(tok_path, 32000, std.testing.allocator);
+    var tokenizer = try SPTokenizer.initV1(tok_path, 32000, std.testing.allocator);
     defer tokenizer.deinit();
 
     {
         const sample = "Hello, world! How are you today?";
-        const ids = [_]Tokenizer.Token{ 1, 15043, 29892, 3186, 29991, 1128, 526, 366, 9826, 29973 };
+        const ids = [_]Token{ 1, 15043, 29892, 3186, 29991, 1128, 526, 366, 9826, 29973 };
 
         const tokens = try tokenizer.encode(sample, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
-        try std.testing.expectEqualSlices(Tokenizer.Token, &ids, tokens);
+        try std.testing.expectEqualSlices(Token, &ids, tokens);
     }
 
     {
         const sample = "Hello\nworld";
-        const ids = [_]Tokenizer.Token{ 1, 15043, 13, 11526 };
+        const ids = [_]Token{ 1, 15043, 13, 11526 };
 
         const tokens = try tokenizer.encode(sample, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
-        try std.testing.expectEqualSlices(Tokenizer.Token, &ids, tokens);
+        try std.testing.expectEqualSlices(Token, &ids, tokens);
     }
 
     {
         const sample = "Byte pair encoding[1][2] (also known as BPE, or digram";
         // zig fmt: off
-        const ids = [_]Tokenizer.Token{
+        const ids = [_]Token{
             1,
             19831, 5101, 8025, 29961, 29896, 3816, 29906, 29962,
             313, 15189, 2998, 408, 350, 4162, 29892, 470,
@@ -460,20 +464,20 @@ test "Tokenizer.encode" {
         const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
-        try std.testing.expectEqualSlices(Tokenizer.Token, &ids, tokens);
+        try std.testing.expectEqualSlices(Token, &ids, tokens);
     }
 
     {
         const sample = @embedFile("assets/bpe_sample.txt");
         const out_ids = @embedFile("assets/bpe_sample_expected.json");
 
-        var ids_json = try std.json.parseFromSlice([]Tokenizer.Token, std.testing.allocator, out_ids, .{});
+        var ids_json = try std.json.parseFromSlice([]Token, std.testing.allocator, out_ids, .{});
         defer ids_json.deinit();
         const ids = ids_json.value;
 
         const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
-        try std.testing.expectEqualSlices(Tokenizer.Token, ids, tokens);
+        try std.testing.expectEqualSlices(Token, ids, tokens);
     }
 }

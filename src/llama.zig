@@ -17,8 +17,8 @@ const token = llm.token;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-const Tokenizer = token.Tokenizer;
-const Token = Tokenizer.Token;
+const Tokenizer = token.SPTokenizer;
+const Token = token.Token;
 
 const Weights = math.Weights;
 
@@ -669,7 +669,7 @@ pub const TransformerV1 = struct {
     ///
     /// Returns a slice of logits from calculation. Caller **does not** down the returned
     /// slice and should not attempt to free it.
-    pub fn forward(self: Self, state: *State, tok: Tokenizer.Token, n_tok: usize, progress: ?std.Progress.Node) []f32 {
+    pub fn forward(self: Self, state: *State, tok: Token, n_tok: usize, progress: ?std.Progress.Node) []f32 {
         // Get a considerable speedup for operations that occur within here.
         @setFloatMode(.optimized);
 
@@ -887,7 +887,7 @@ pub const TransformerV1 = struct {
     }
 
     /// Apply and copy token embeddings for the current input `token` into the `out` vector.
-    fn applyTokenEmbedding(self: Self, out: []f32, tok: Tokenizer.Token) void {
+    fn applyTokenEmbedding(self: Self, out: []f32, tok: Token) void {
         const dim = self.config.dim;
         const token_offset: usize = @as(usize, @intCast(tok)) * dim;
 

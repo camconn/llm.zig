@@ -330,6 +330,14 @@ test "match GPT2 tokenization groups" {
     const ws_only = "    \r\n\t ";
     const ws_only_exp = [_][]const u8{"    \r\n\t "};
     try verify(ws_only, &ws_only_exp);
+
+    const hello_ex = "Hello, friend";
+    const hello_exp = [_][]const u8{ "Hello", ",", " friend" };
+    try verify(hello_ex, &hello_exp);
+
+    const mixed = "I got your number it's 867-5309!";
+    const mixed_exp = [_][]const u8{ "I", " got", " your", " number", " it", "'s", " 867", "-", "5309", "!" };
+    try verify(mixed, &mixed_exp);
 }
 
 // implementations of various helper functions for matching against unicode groups

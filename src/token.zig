@@ -9,7 +9,9 @@
 
 const std = @import("std");
 
-const ggml = @import("root.zig").ggml;
+const llm = @import("root.zig");
+const ggml = llm.ggml;
+const regex = llm.regex;
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -665,12 +667,15 @@ pub const TikTokenizer = struct {
     const SPACE = "Ġ";
 
     pub const TokenEntry = struct {
-        score: f32,
-        id: Token,
+        id: Rank,
         chars: []u8,
     };
 
-    const Ranks = std.StringHashMap(u64);
+    const Rank = u64;
+    const Ranks = std.StringHashMap(Rank);
+    const Token = Rank;
+    const TokenList = std.ArrayList(Rank);
+
     tokens: Ranks,
     arena: ArenaAllocator,
 
@@ -827,7 +832,7 @@ pub const TikTokenizer = struct {
 
         const Merges = std.StringHashMap(usize);
         var merges = Merges.init(alloc);
-        defer merges.deinit();
+        errdefer merges.deinit();
 
         var last_key: ?[]const u8 = null;
         while (true) {
@@ -876,39 +881,147 @@ pub const TikTokenizer = struct {
     /// Free up any resources associated with this `Tokenizer` and invalidate any pointers to
     /// token strings or token entries.
     pub fn deinit(self: *Self) void {
-        self.tokens.deinit();
         self.arena.deinit();
     }
 
     /// Encode text into a series of tokens.
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
-    /// The caller is responsible for freeing the returned tokens from `token_alloc`.
-    pub fn encode(_: Self, _: []const u8, _: Allocator) ![]Token {
-        @panic("TODO");
+    /// The caller is responsible for freeing the slice of returned tokens with `token_alloc`.
+    pub fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Self.Token {
+        var tokens = TokenList.init(token_alloc);
+        defer tokens.deinit();
+        try tokens.ensureTotalCapacity(text.len / 2);
+
+        // Break the input text with the GPT-2 regex to get group candidates for BPE.
+        var iter = regex.Gpt2Pattern.init(text);
+        while (iter.next()) |group| {
+            try self.encode_piece(group, &tokens, token_alloc);
+        }
+
+        return try tokens.toOwnedSlice();
+    }
+
+    /// Encode a `piece` within a greater input string into BPE-form and append to `tokens` list.
+    /// Assumes that the `piece` is representable in the BPE form for this `TikTokenizer`.
+    /// Requires the provided piece is non-empty.
+    fn encode_piece(self: Self, piece: []const u8, tokens: *TokenList, allocator: Allocator) !void {
+        // Base case, the piece is just 1 token that we can directly encode.
+        if (self.tokens.get(piece)) |val| {
+            try tokens.append(val);
+            return;
+        }
+
+        var arena = ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        // We have a composite piece which can be decomposed. Go ahead and perform Byte-Pair
+        // Encoding and then merge up.
+        //
+        // Below is a simplified reproduction of `_byte_pair_merge` within `tiktoken/src/lib.rs`
+        const Pair = struct { usize, Rank };
+        const Pairs = std.ArrayList(Pair);
+        var parts = Pairs.init(alloc);
+        defer parts.deinit();
+        try parts.ensureTotalCapacity(piece.len + 1);
+
+        const maximum = std.math.maxInt(Rank);
+        var minimum: struct { Rank, Rank } = .{ maximum, maximum };
+
+        // Populate initial `parts` list with baseline BPE ranks for merging.
+        for (0..piece.len - 1) |i| {
+            const tmp = piece[i .. i + 2];
+            const r = self.tokens.get(tmp) orelse maximum;
+            if (r < minimum[0]) {
+                minimum[0] = @intCast(r);
+                minimum[1] = @intCast(i);
+            }
+            try parts.append(.{ i, r });
+        }
+
+        try parts.append(.{ piece.len - 1, maximum });
+        try parts.append(.{ piece.len, maximum });
+
+        // Merge together ranks in the `parts` list and try to elide the middle element if possible.
+        const getRank = struct {
+            // Merge together the entries `[i, i+1, i+2]` and return the lower-scoring form
+            // if it exists, or return the maximum score value otherwise.
+            fn getRank(pc_: []const u8, rs_: Ranks, parts_: Pairs, i: usize) Rank {
+                if (i + 3 < parts_.items.len) {
+                    const tmp = pc_[parts_.items[i][0]..parts_.items[i + 3][0]];
+
+                    return rs_.get(tmp) orelse maximum;
+                } else {
+                    return maximum;
+                }
+            }
+        }.getRank;
+
+        // While not at the end, merge pairs together, going from the lower rank pair to the highest
+        // rank pair.
+        while (minimum[0] != maximum) {
+            std.debug.print("{any}\n", .{parts.items});
+            const i = minimum[1];
+
+            if (i > 0) {
+                parts.items[i - 1][1] = getRank(piece, self.tokens, parts, i - 1);
+            }
+
+            parts.items[i][1] = getRank(piece, self.tokens, parts, i);
+            _ = parts.orderedRemove(i + 1);
+
+            minimum = .{ maximum, maximum };
+            for (0.., parts.items[0 .. parts.items.len - 1]) |j, pair| {
+                const rank = pair[1];
+
+                if (rank < minimum[0]) {
+                    minimum = .{ rank, j };
+                }
+            }
+        }
+
+        // No we're back in `byte_pair_encode`, so iterate over `parts` in pairs of 2
+        // and find the rank for each BPE and then add that back to tokens.
+        var i: usize = 0;
+        while (i < parts.items.len - 2) : (i += 1) {
+            const lhs = parts.items[i][0];
+            const rhs = parts.items[i + 1][0];
+            const str = piece[lhs..rhs];
+            if (self.tokens.get(str)) |bpe| {
+                try tokens.append(bpe);
+            } else {
+                std.debug.print("Issue finding BPE encoding for {s} ({d}-{d})\n", .{ str, lhs, rhs });
+                @panic("Unable to BPE");
+            }
+        }
     }
 };
 
-pub fn main() !void {
-    const vocab_path = "vocab.bpe";
-    const encoder_path = "encoder.json";
+test "GPT-2 Tokenizer" {
+    var vocab_stream = std.io.fixedBufferStream(@embedFile("assets/gpt2-vocab.bpe"));
+    const vocab = vocab_stream.reader();
+    var encoder_stream = std.io.fixedBufferStream(@embedFile("assets/gpt2-encoder.json"));
+    const encoder = encoder_stream.reader();
 
-    std.debug.print("Opening {s} and {s} for BPE\n", .{ vocab_path, encoder_path });
+    const alloc = std.testing.allocator;
 
-    const cwd = std.fs.cwd();
-
-    const vocab_file = try cwd.openFile(vocab_path, .{ .mode = .read_only });
-    defer vocab_file.close();
-    const encoder_file = try cwd.openFile(encoder_path, .{ .mode = .read_only });
-    defer encoder_file.close();
-
-    std.debug.print("Files opened successfully. Loading TikToken model\n", .{});
-
-    const vocab = vocab_file.reader();
-    const encoder = encoder_file.reader();
-
-    var tokenizer = try TikTokenizer.loadDataToBPERanks(vocab, encoder, std.heap.page_allocator);
+    var tokenizer = try TikTokenizer.loadDataToBPERanks(vocab, encoder, alloc);
     defer tokenizer.deinit();
 
-    std.debug.print("Loaded TikTokenizer with {d} entries\n", .{tokenizer.tokens.count()});
+    // Find these values from [1] or derive them manually with the `tiktoken` Python library
+    // [1]: https://tiktokenizer.vercel.app/?model=gpt2
+    const T = TikTokenizer.Token;
+    const h1 = [4]T{ 15496, 11, 220, 0 };
+    const cases = [_]struct { []const u8, []const T }{
+        .{ "Hello, world!", &h1 },
+    };
+
+    for (cases) |case| {
+        const input = case[0];
+        const expected = case[1];
+        const actual = try tokenizer.encode(input, alloc);
+        defer alloc.free(actual);
+        try std.testing.expectEqualSlices(TikTokenizer.Rank, expected, actual);
+    }
 }

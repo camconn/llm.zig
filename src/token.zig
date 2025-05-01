@@ -483,30 +483,6 @@ test "SPTokenizer.encode" {
     }
 }
 
-// Matches the literal strings
-// 's
-// 't
-// 're
-// 've
-// 'm
-// 'll
-// 'd
-// optional SPACE followed by
-//   [\p{L}]+          - 1 or more unicode class L: Matches any letter from any language
-//   [\p{N}]+          - 1 or more unicode class N: Matches any number in any script
-//   [^\s\p{L}\p{N}]+  - 1 or more of (NOT whitespace and NOT unicode class L and NOT unicode class N)
-// \s+(?!\S)           - 1 or more whitespace followed by literal `?` or `!` or NOT whitespace
-// \s+                 - 1 or more whitespace
-
-/// GPT-2 TikToken regex for GPT-2
-const tiktoken_gpt =
-    \\'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
-;
-/// A faster variant of the TikToken GPT-2 regex
-const tiktoken_gpt2_fast =
-    \\'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s
-;
-
 /// Helper reference for codepoints in the base BPE setup.
 const codepoints: [1024]u8 = cc: {
     var buf: [1024]u8 = undefined;

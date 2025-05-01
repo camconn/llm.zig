@@ -11,6 +11,7 @@
 pub const ggml = @import("ggml.zig");
 pub const llama = @import("llama.zig");
 pub const math = @import("math.zig");
+pub const regex = @import("regex.zig");
 pub const sample = @import("sample.zig");
 pub const token = @import("token.zig");
 

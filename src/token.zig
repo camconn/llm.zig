@@ -16,16 +16,16 @@ const regex = llm.regex;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-/// A single Token's ID. Represents one of the possible vocabulary tokens for a number of models.
-/// Note that invalid/padding tokens are < 0. Additionally, Tokens are not necessarily comparable
-/// between models.
-pub const Token = i32;
-
 const tokenizer_key = "tokenizer.ggml.model";
 
-/// Implementation of the SentencePiece tokenizer.
+/// Implementation of the `sentencepiece` tokenizer.
 pub const SPTokenizer = struct {
     const Self = @This();
+
+    /// A single Token's ID. Represents one of the possible vocabulary tokens for a number of models.
+    /// Note that invalid/padding tokens are < 0.
+    /// Tokens are not necessarily compatible between models.
+    pub const Token = i32;
 
     /// A SentencePiece Token Entry.
     pub const TokenEntry = struct {
@@ -435,28 +435,28 @@ test "SPTokenizer.encode" {
 
     {
         const sample = "Hello, world! How are you today?";
-        const ids = [_]Token{ 1, 15043, 29892, 3186, 29991, 1128, 526, 366, 9826, 29973 };
+        const ids = [_]SPTokenizer.Token{ 1, 15043, 29892, 3186, 29991, 1128, 526, 366, 9826, 29973 };
 
         const tokens = try tokenizer.encode(sample, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
-        try std.testing.expectEqualSlices(Token, &ids, tokens);
+        try std.testing.expectEqualSlices(SPTokenizer.Token, &ids, tokens);
     }
 
     {
         const sample = "Hello\nworld";
-        const ids = [_]Token{ 1, 15043, 13, 11526 };
+        const ids = [_]SPTokenizer.Token{ 1, 15043, 13, 11526 };
 
         const tokens = try tokenizer.encode(sample, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
-        try std.testing.expectEqualSlices(Token, &ids, tokens);
+        try std.testing.expectEqualSlices(SPTokenizer.Token, &ids, tokens);
     }
 
     {
         const sample = "Byte pair encoding[1][2] (also known as BPE, or digram";
         // zig fmt: off
-        const ids = [_]Token{
+        const ids = [_]SPTokenizer.Token{
             1,
             19831, 5101, 8025, 29961, 29896, 3816, 29906, 29962,
             313, 15189, 2998, 408, 350, 4162, 29892, 470,
@@ -467,21 +467,21 @@ test "SPTokenizer.encode" {
         const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
-        try std.testing.expectEqualSlices(Token, &ids, tokens);
+        try std.testing.expectEqualSlices(SPTokenizer.Token, &ids, tokens);
     }
 
     {
         const sample = @embedFile("assets/bpe_sample.txt");
         const out_ids = @embedFile("assets/bpe_sample_expected.json");
 
-        var ids_json = try std.json.parseFromSlice([]Token, std.testing.allocator, out_ids, .{});
+        var ids_json = try std.json.parseFromSlice([]SPTokenizer.Token, std.testing.allocator, out_ids, .{});
         defer ids_json.deinit();
         const ids = ids_json.value;
 
         const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
-        try std.testing.expectEqualSlices(Token, ids, tokens);
+        try std.testing.expectEqualSlices(SPTokenizer.Token, ids, tokens);
     }
 }
 
@@ -660,14 +660,12 @@ pub const TikTokenizer = struct {
         "qwen3.context_length",
     };
 
-    pub const TokenEntry = struct {
-        id: Rank,
-        chars: []u8,
-    };
+    /// A single Token's ID. Represents one of the possible vocabulary tokens for a number of models.
+    /// Tokens are not necessarily compatible between models.
+    pub const Token = u64;
 
-    const Rank = u64;
+    const Rank = Token;
     const Ranks = std.StringHashMap(Rank);
-    const Token = Rank;
     const TokenList = std.ArrayList(Rank);
 
     tokens: Ranks,
@@ -899,7 +897,7 @@ pub const TikTokenizer = struct {
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
     /// The caller is responsible for freeing the slice of returned tokens with `token_alloc`.
-    pub fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Self.Token {
+    pub fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Token {
         var tokens = TokenList.init(token_alloc);
         defer tokens.deinit();
         try tokens.ensureTotalCapacity(text.len / 2);
@@ -1016,7 +1014,7 @@ pub const TikTokenizer = struct {
 
     /// Decode a list of `tokens` into the string representation. Caller is responsible for freeing
     /// the returned memory.
-    pub fn decode(self: Self, tokens: []Self.Token, allocator: std.mem.Allocator) ![]u8 {
+    pub fn decode(self: Self, tokens: []Token, allocator: std.mem.Allocator) ![]u8 {
         var ret = std.ArrayList(u8).init(allocator);
         try ret.ensureTotalCapacity(tokens.len * 4);
         defer ret.deinit();

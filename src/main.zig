@@ -16,7 +16,7 @@ const print_perf = false;
 const Config = llama.Config;
 const TransformerV1 = llama.TransformerV1;
 const SPTokenizer = llm.token.SPTokenizer;
-const Token = llm.token.Token;
+const Token = SPTokenizer.Token;
 const Sampler = llm.sample.Sampler;
 const State = llama.State;
 

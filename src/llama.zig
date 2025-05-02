@@ -18,7 +18,7 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const Tokenizer = token.SPTokenizer;
-const Token = token.Token;
+const Token = Tokenizer.Token;
 
 const Weights = math.Weights;
 

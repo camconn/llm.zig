@@ -25,6 +25,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_unit_tests.step);
 
     // ========================================
+    // Docs
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "doc",
+    });
+    const docs_step = b.step("docs", "Build module documentation");
+    docs_step.dependOn(&lib.step);
+    docs_step.dependOn(&install_docs.step);
+
+    // ========================================
     // Executable options
 
     // We will also create a module for our other entry point, 'main.zig'.

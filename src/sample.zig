@@ -15,7 +15,7 @@ const math = llm.math;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
-const Token = llm.token.Token;
+const Token = llm.token.SPTokenizer.Token;
 
 pub const Sampler = struct {
     const Self = @This();

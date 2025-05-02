@@ -997,7 +997,7 @@ pub const TikTokenizer = struct {
             }
         }
 
-        // No we're back in `byte_pair_encode`, so iterate over `parts` in pairs of 2
+        // Now we're back in `byte_pair_encode`, so iterate over `parts` in pairs of 2
         // and find the rank for each BPE and then add that back to tokens.
         var i: usize = 0;
         while (i < parts.items.len - 1) : (i += 1) {

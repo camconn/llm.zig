@@ -875,7 +875,7 @@ pub const TikTokenizer = struct {
                 .partial_string_escaped_1, .partial_string_escaped_2,
                 .partial_string_escaped_3, .partial_string_escaped_4 => {
                     std.debug.print("Got partial variant: {any}\n", .{tok});
-                    @panic("partial should never happen with .alloc_if_needed");
+                    @panic("partial should never happen with .alloc_always");
                 },
                 // zig fmt: on
                 else => {

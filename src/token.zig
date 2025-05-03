@@ -1109,6 +1109,11 @@ test "GPT-2 Tokenizer" {
     const h5 = [_]T{ 464, 1049, 3355, 12520, 100, 109, 318, 287, 12520, 229, 101, 8582, 229, 111 };
     const h6 = [_]T{ 1639, 389, 7062, 50256, 271, 340, 1107, 996, 50256, 3549, 2420, 994 };
     const h7 = [_]T{ 50256, 1662, 262, 886, 996, 0, 50256 };
+    const h8 = [_]T{
+        464,   1049, 3355,  12520, 100, 109, 318, 287,  12520, 229, 101,  8582,
+        229,   111,  50256, 40,    561, 588, 284, 3187, 340,   530, 1110, 13,
+        50256,
+    };
     const cases = [_]struct { []const u8, []const T }{
         .{ "Hello, friend", &h1 },
         .{ "Hello, world!", &h2 },
@@ -1117,6 +1122,7 @@ test "GPT-2 Tokenizer" {
         .{ "The great wall 🧱 is in 🇨🇳", &h5 },
         .{ "You are welcome<|endoftext|>is it really though<|endoftext|>more text here", &h6 },
         .{ "<|endoftext|>not the end though!<|endoftext|>", &h7 },
+        .{ "The great wall 🧱 is in 🇨🇳<|endoftext|>I would like to visit it one day.<|endoftext|>", &h8 },
     };
 
     for (cases) |case| {

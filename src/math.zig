@@ -317,7 +317,6 @@ pub fn layerNorm(T: type, x: []T, w: []T, b: []T, scratch: []T) void {
     std.debug.assert(w.len == b.len);
     std.debug.assert(b.len == scratch.len);
 
-    // Now perform scaling an biasing by the weights and biases.
     const Vec = comptime Vect(T);
     const vector_len = vectLen(Vec);
 
@@ -329,8 +328,11 @@ pub fn layerNorm(T: type, x: []T, w: []T, b: []T, scratch: []T) void {
     const varnce = variance(T, x, scratch);
 
     const eps_c = 0.00001;
+    // eps is the epsilon soft add term
     const eps: Vec = @splat(eps_c);
+    // mu is the average
     const mu: Vec = @splat(@as(T, @floatCast(avg)));
+    // `vs` is the population variance
     const vs: Vec = @splat(@as(T, @floatCast(varnce)));
     for (0..chunks) |i| {
         const idx = i * vector_len;

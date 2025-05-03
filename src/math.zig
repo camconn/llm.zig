@@ -12,6 +12,7 @@ const std = @import("std");
 /// Contains a slice of `Block`s in `WeightFormat` to use when performing calculations.
 pub const Weights = union(WeightFormat) {
     f32: []Block(.f32),
+    f16: []Block(.f16),
     q8_0: []Block(.q8_0),
 };
 
@@ -21,6 +22,10 @@ pub const WeightFormat = enum {
     /// This is not actually a quantization, but a pseudo-type for internal purposes.
     /// Blocks of `f32` are just the individual `f32` weights.
     f32,
+    /// Half-precision weights in `f16` form.
+    /// This may or may not be a quantization depending on the native format of the weights.
+    /// This is not treated as a quantization format, but just like an `f32`.
+    f16,
     /// Represents 8 bit weights scaled by a single precision float `d` for every 32 weights.
     /// The original weight `w = i * d` where `i` is the quantized integer and `d` is the scale.
     q8_0,
@@ -49,6 +54,7 @@ pub const Q80Block = extern struct {
 pub fn Block(format: WeightFormat) type {
     return switch (format) {
         .f32 => f32,
+        .f16 => f16,
         .q8_0 => Q80Block,
     };
 }
@@ -56,6 +62,9 @@ pub fn Block(format: WeightFormat) type {
 test "Block() size" {
     const F32Block = Block(.f32);
     try std.testing.expectEqual(@sizeOf(f32), @sizeOf(F32Block));
+
+    const F16Block = Block(.f16);
+    try std.testing.expectEqual(@sizeOf(f16), @sizeOf(F16Block));
 
     // Ensure Q8_0 compatibility when reading from a GGUF file.
     const Q8_0Block = Block(.q8_0);
@@ -65,7 +74,7 @@ test "Block() size" {
 
 /// Get the unit length of a `Block()`.
 pub fn blockUnitLen(BlockType: type) comptime_int {
-    if (BlockType == f32) {
+    if (BlockType == f32 or BlockType == f16) {
         return 1;
     }
 
@@ -76,6 +85,7 @@ pub fn blockUnitLen(BlockType: type) comptime_int {
 
 test "block unit length" {
     try std.testing.expectEqual(1, blockUnitLen(Block(.f32)));
+    try std.testing.expectEqual(1, blockUnitLen(Block(.f16)));
     try std.testing.expectEqual(32, blockUnitLen(Block(.q8_0)));
 }
 
@@ -129,6 +139,13 @@ test "Vect setup" {
     };
 }
 
+fn floatOnly(T: type) void {
+    switch (@typeInfo(T)) {
+        .float => {},
+        else => @compileError("Only float types supported for this function"),
+    }
+}
+
 /// Perform RMS Normalization on `x` with the weights `y` and store the result in `out`.
 /// Requires all inputs to have the same length.
 ///
@@ -137,6 +154,24 @@ test "Vect setup" {
 /// stability.
 /// [1]: https://arxiv.org/abs/1910.07467
 pub fn rmsNorm(out: []f32, x: []const f32, y: []const f32) void {
+    rmsNormT(f32, out, x, y);
+}
+
+/// Perform RMS Normalization on `x` with the weights `y` and store in `out` with type `T`.
+/// Requires all inputs to have the same length.
+/// Requires that `T` is either `f32` or `f16`.
+///
+/// This method mirrors the implementation of `RMSNorm` in Meta's `model.py`.
+/// It implements the method described in [1], plus adds a small epsilon factor for numeric
+/// stability.
+/// [1]: https://arxiv.org/abs/1910.07467
+pub fn rmsNormT(T: type, out: []T, x: []const T, y: []const T) void {
+    floatOnly(T);
+    //switch (@typeInfo(T)) {
+    //    .float => {},
+    //    else => @compileError("rmsNormT is only supported for floating point types "),
+    //}
+
     if (!(x.len == y.len and y.len == out.len)) {
         std.debug.print("lengths: out={d}, x={d}, y={d}\n", .{ out.len, x.len, y.len });
         std.debug.assert(out.len == x.len);
@@ -144,13 +179,13 @@ pub fn rmsNorm(out: []f32, x: []const f32, y: []const f32) void {
         @panic("Mismatched lengths");
     }
 
-    const Vec = comptime Vect(f32);
+    const Vec = comptime Vect(T);
     const vector_len = comptime vectLen(Vec);
 
     const chunks = x.len / vector_len;
     const leftover_offset = chunks * vector_len;
 
-    var sum: f32 = 0;
+    var sum: T = 0;
     for (0..chunks) |i| {
         const idx = i * vector_len;
         const xs: Vec = x[idx .. idx + vector_len][0..vector_len].*;
@@ -166,9 +201,9 @@ pub fn rmsNorm(out: []f32, x: []const f32, y: []const f32) void {
     }
 
     const epsilon = 1e-9;
-    const x_len: f32 = @floatFromInt(x.len);
-    const mean = sum / x_len + epsilon;
-    const rms = std.math.sqrt(mean);
+    const x_len: T = @floatFromInt(x.len);
+    const avg = sum / x_len + epsilon;
+    const rms = std.math.sqrt(avg);
 
     // Now perform division + multiply by weights.
     const divisor: Vec = @splat(rms);
@@ -424,10 +459,12 @@ pub fn elementProduct(out: []f32, x: []const f32, y: []const f32) void {
 pub fn matrixMul(out: []f32, m: Weights, x: Weights, rows: usize, cols: usize) void {
     const x_len = switch (x) {
         .f32 => |f| f.len,
+        .f16 => |f| f.len,
         .q8_0 => |q| q.len * blockUnitLen(Block(.q8_0)),
     };
     const m_len = switch (m) {
         .f32 => |f| f.len,
+        .f16 => |f| f.len,
         .q8_0 => |q| q.len * blockUnitLen(Block(.q8_0)),
     };
 
@@ -439,6 +476,7 @@ pub fn matrixMul(out: []f32, m: Weights, x: Weights, rows: usize, cols: usize) v
     // Poor man's dynamic dispatch
     switch (m) {
         .f32 => matrixMul_f32(out, m.f32, x.f32, rows, cols),
+        .f16 => @panic("unimplemented"),
         .q8_0 => matrixMul_q8_0(out, m.q8_0, x.q8_0, rows, cols),
     }
 }
@@ -746,16 +784,26 @@ pub fn dequantize(
     weights: []const Block(format),
     out: []f32,
 ) !void {
+    try dequantizeT(f32, format, weights, out);
+}
+
+pub fn dequantizeT(
+    T: type,
+    comptime format: WeightFormat,
+    weights: []const Block(format),
+    out: []T,
+) !void {
+    floatOnly(T);
     if (weights.len == 0) {
         return error.Empty;
     }
 
-    if (format == .f32) {
+    if (format == .f32 or format == .f16) {
         return;
     }
 
     switch (format) {
-        .q8_0 => dequantize_q8_0(weights, out),
+        .q8_0 => dequantize_q8_0(T, weights, out),
         else => @compileError("dequantize method is unimplemented for " ++ format),
     }
     return;
@@ -765,7 +813,7 @@ pub fn dequantize(
 /// Dequantize block from the `Q8_0` quantization format into their `f32` values.
 /// Refer to `dequantize_row_q8_0` in GGML [1] for the reference implementation.
 /// [1]: https://github.com/ggml-org/ggml/blob/489716ba99ecd51164f79e8c6fec0b5bf634eac9/src/ggml-quants.c#L349
-fn dequantize_q8_0(in: []const Block(.q8_0), out: []f32) void {
+fn dequantize_q8_0(T: type, in: []const Block(.q8_0), out: []T) void {
     const BlockType = Block(.q8_0);
     const block_size = blockUnitLen(BlockType);
 
@@ -779,7 +827,7 @@ fn dequantize_q8_0(in: []const Block(.q8_0), out: []f32) void {
         for (0..block_size) |j| {
             const elem = block.weights[j];
             const elem_f: f32 = @floatFromInt(@as(i32, elem));
-            out[idx + j] = elem_f * scale;
+            out[idx + j] = @floatCast(elem_f * scale);
         }
     }
 }

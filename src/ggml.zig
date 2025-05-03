@@ -324,7 +324,7 @@ pub const TensorInfo = struct {
 
     /// Get a raw slice of the Tensor's data in native model order.
     /// Get the elements of this tensor from the files `mmap(2)` pointer.
-    pub fn getElems(self: Self, tensor_data: [*]const u8) math.Weights {
+    pub fn getElems(self: Self, tensor_data: []const u8) math.Weights {
         const tensor = tensor_data[self.offset..];
         const target = @intFromPtr(&tensor[0]);
 
@@ -338,6 +338,10 @@ pub const TensorInfo = struct {
             .F32 => {
                 const ptr: [*]math.Block(.f32) = @ptrFromInt(target);
                 return .{ .f32 = ptr[0..len] };
+            },
+            .F16 => {
+                const ptr: [*]math.Block(.f16) = @ptrFromInt(target);
+                return .{ .f16 = ptr[0..len] };
             },
             .Q8_0 => {
                 const Block = comptime math.Block(.q8_0);
@@ -579,6 +583,19 @@ pub const GGUFFile = struct {
         return getMetadataValue(key, self.metadata);
     }
 
+    /// Get the Metadata value for `key` if and only if it is present and of type `t`.
+    /// Return `null` otherwise.
+    pub fn getValueT(self: *const Self, key: []const u8, t: MetadataType) ?Value {
+        if (self.getValue(key)) |inner| {
+            const as_enum: MetadataType = inner;
+            if (as_enum == t) {
+                return inner;
+            }
+            std.debug.print("ggml: Mismatched type. Wanted {s} but got {s}\n", .{ @tagName(t), @tagName(as_enum) });
+        }
+        return null;
+    }
+
     pub fn dumpMetadata(self: *const Self) void {
         for (self.metadata) |kv| {
             const value_type: MetadataType = kv.value;
@@ -621,8 +638,7 @@ pub const GGUFFile = struct {
     pub fn getTensorWeights(self: Self, name: []const u8) ?math.Weights {
         if (self.getTensorInfo(name)) |info| {
             const tensor_data = self.mmap_ptr[self.tensor_data_offset..];
-            const tensor_data_ptr = tensor_data.ptr;
-            return info.getElems(tensor_data_ptr);
+            return info.getElems(tensor_data);
         }
         return null;
     }

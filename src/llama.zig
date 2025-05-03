@@ -905,6 +905,12 @@ pub const TransformerV1 = struct {
                 math.dequantize(.q8_0, embeddings, out) catch
                     @panic("Terrible situation in embeddings");
             },
+            else => {
+                std.debug.print("Unsupported token embedding format: {any}\n", .{
+                    @as(math.WeightFormat, self.token_embed),
+                });
+                @panic("Unsupported token embedding quantization");
+            },
         }
     }
 

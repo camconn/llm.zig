@@ -671,14 +671,15 @@ pub const TikTokenizer = struct {
     const Reverse = std.AutoHashMap(Rank, []const u8);
 
     tokens: Ranks,
-    arena: ArenaAllocator,
     rank_to_token: Reverse,
     special_tokens: Specials,
+
+    arena: ArenaAllocator,
 
     /// Read and initialize a `TikTokenizer` instance from the provided `file` using the given
     /// `allocator`.
     pub fn init(file: ggml.GGUFFile, allocator: Allocator) !TikTokenizer {
-        const tokenizer_model = file.getValue(tokenizer_key).?.string;
+        const tokenizer_model = file.getValueT(tokenizer_key, .string).?.string;
         // TODO: Swap regex pattern based on support tokenizer_model string.
         if (!std.mem.eql(u8, tokenizer_model.str, "gpt2")) {
             std.debug.print("Found non-GPT tokenizer model: {s}\n", .{tokenizer_model.str});
@@ -688,15 +689,9 @@ pub const TikTokenizer = struct {
         var found_context_len: bool = false;
         var context_len: u32 = undefined;
         for (context_len_keys) |key| {
-            if (file.getValue(key)) |len| {
+            if (file.getValueT(key, .uint32)) |len| {
                 found_context_len = true;
-                switch (len) {
-                    .uint32 => |l| context_len = l,
-                    else => {
-                        std.debug.print("Found context len in {s}, but it had wrong type\n", .{key});
-                        return error.Tokenizer;
-                    },
-                }
+                context_len = len.uint32;
             }
         }
         if (!found_context_len) {
@@ -705,38 +700,88 @@ pub const TikTokenizer = struct {
         }
 
         const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
-        const token_types = file.getValue("tokenizer.ggml.token_type").?.array;
+        //const token_types = file.getValue("tokenizer.ggml.token_type").?.array;
         const token_merges = file.getValue("tokenizer.ggml.merges").?.array;
         // The vocabulary size is equivalent to the length of the tokens array.
-        const vocab_size = token_chars.len;
+        const vocab_size: usize = @intCast(token_chars.len);
         std.debug.print("vocab size: {d}\n", .{vocab_size});
 
-        std.debug.print("types: {d}; merges {d}\n", .{ token_types.len, token_merges.len });
+        //std.debug.print("types: {d}; merges {d}\n", .{ token_types.len, token_merges.len });
 
-        const bos = file.getValue("tokenizer.ggml.bos_token_id").?.uint32;
-        const eos = file.getValue("tokenizer.ggml.eos_token_id").?.uint32;
+        const bos = file.getValueT("tokenizer.ggml.bos_token_id", .uint32).?.uint32;
+        const eos = file.getValueT("tokenizer.ggml.eos_token_id", .uint32).?.uint32;
         //const padding = file.getValue("tokenizer.ggml.padding_token_id").?.uint32;
         var add_bos: bool = false;
-        if (file.getValue("tokenizer.ggml.add_bos_token")) |val| {
-            // TODO: Assert on type
+        if (file.getValueT("tokenizer.ggml.add_bos_token", .boolean)) |val| {
             add_bos = val.boolean;
         }
+        // TODO: We assume that EOS and BOS tokens are always at the end of the vocabulary.
+        //       That may not always be true, so we should fix that.
+        const n_specials: usize = if (bos == eos) 1 else 2;
+        const normal_vocab: usize = vocab_size - n_specials;
 
-        std.debug.print("bos {d} eos {d}\n", .{ bos, eos });
+        // Ensure vocabulary in file is consisten
+        const non_merged_vocab = @as(usize, std.math.maxInt(u8)) + 1 + n_specials;
+        const num_merges = vocab_size - non_merged_vocab;
+        if (num_merges != token_merges.array.len) {
+            std.debug.print("Mismatch in vocab; num_merges={d} but non-byte vocab is {d}\n", .{
+                num_merges,
+                token_merges.array.len,
+            });
+            return error.BadFormat;
+        }
+
+        //std.debug.print("bos {d} eos {d}\n", .{ bos, eos });
 
         var arena = ArenaAllocator.init(allocator);
-        // TODO: errdefer, not defer
-        defer arena.deinit();
-        //const alloc = arena.allocator();
+        errdefer arena.deinit();
+        const alloc = arena.allocator();
 
-        //var tokens = Storage{};
-        //try tokens.ensureTotalCapacity(alloc, vocab_size + 10); // add 10 size for safety.
+        var tokens = Ranks.init(alloc);
+        errdefer tokens.deinit();
+        try tokens.ensureTotalCapacity(@intCast(normal_vocab));
 
-        @panic("Read stuff from file");
+        for (0..normal_vocab) |i| {
+            const rank: Rank = @intCast(i);
+            const tok = token_chars.array[i].string.str;
+            try tokens.put(tok, rank);
+        }
+
+        var special = Specials.init(alloc);
+        errdefer special.deinit();
+        try special.ensureTotalCapacity(@intCast(n_specials));
+
+        if (n_specials >= 1) {
+            for (0..n_specials) |i| {
+                const rank: Rank = normal_vocab + @as(Rank, @intCast(i));
+                const tok = token_chars.array[i].string.str;
+                try special.put(tok, rank);
+            }
+        }
+
+        // Setup reverse mappings
+        var reverse = Reverse.init(alloc);
+        errdefer reverse.deinit();
+        try reverse.ensureTotalCapacity(@intCast(vocab_size));
+
+        var norm_iter = tokens.iterator();
+        while (norm_iter.next()) |next| {
+            try reverse.put(next.value_ptr.*, next.key_ptr.*);
+        }
+        var special_iter = special.iterator();
+        while (special_iter.next()) |next| {
+            try reverse.put(next.value_ptr.*, next.key_ptr.*);
+        }
 
         // Copy the Area after all of the copies have been done, otherwise there will be
         // a leak from the Arena's allocations.
         // Same with Token Storage
+        return .{
+            .tokens = tokens,
+            .special_tokens = special,
+            .rank_to_token = reverse,
+            .arena = arena,
+        };
     }
 
     /// Load a TikToken BPE file and encoder JSON file into an actual set of ranks.

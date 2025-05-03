@@ -666,11 +666,14 @@ pub const TikTokenizer = struct {
 
     const Rank = Token;
     const Ranks = std.StringHashMap(Rank);
+    const Specials = std.StringArrayHashMap(Token);
     const TokenList = std.ArrayList(Rank);
+    const Reverse = std.AutoHashMap(Rank, []const u8);
 
     tokens: Ranks,
     arena: ArenaAllocator,
-    rank_to_token: std.AutoHashMap(Rank, []const u8),
+    rank_to_token: Reverse,
+    special_tokens: Specials,
 
     /// Read and initialize a `TikTokenizer` instance from the provided `file` using the given
     /// `allocator`.
@@ -803,24 +806,13 @@ pub const TikTokenizer = struct {
         }
         //std.debug.print("Read {d} entries from BPE file and set {d}\n", .{ lines, n });
 
-        var merge_arena = ArenaAllocator.init(alloc);
-        defer merge_arena.deinit();
-        const merge_alloc = merge_arena.allocator();
-
-        var merges = try readJsonMerges(encoder_reader, merge_alloc);
-        _ = merges.remove("<|endoftext|>");
-        _ = merges.remove("<|startoftext|>");
-
-        //std.debug.print("Decoded {d} merges from encoder.json\n", .{merges.count()});
-        //std.debug.print("Decoded {d} ranks from vocab.bpe\n", .{ranks.count()});
-        std.debug.assert(merges.count() == ranks.count());
-
         // Add special tokens
-        _ = special_tokens;
-        //var special_iter = special_tokens.iterator();
-        //while (special_iter.next()) |next| {
-        //    try ranks.put(next.key_ptr.*, next.value_ptr.*);
-        //}
+        var specials = Specials.init(alloc);
+        errdefer specials.deinit();
+        var special_iter = special_tokens.iterator();
+        while (special_iter.next()) |next| {
+            try specials.put(next.key_ptr.*, next.value_ptr.*);
+        }
 
         // Create a reversed mapping of Token to String
         var reversed = std.AutoHashMap(Rank, []const u8).init(alloc);
@@ -833,11 +825,29 @@ pub const TikTokenizer = struct {
             const rank = next.value_ptr;
             try reversed.put(rank.*, token.*);
         }
+        // Add special tokens to reverse id to string mapping
+        special_iter.index = 0; // reset specials iterator
+        while (special_iter.next()) |next| {
+            try reversed.put(next.value_ptr.*, next.key_ptr.*);
+        }
+
+        var merge_arena = ArenaAllocator.init(alloc);
+        defer merge_arena.deinit();
+        const merge_alloc = merge_arena.allocator();
+
+        var merges = try readJsonMerges(encoder_reader, merge_alloc);
+        _ = merges.remove("<|endoftext|>");
+        _ = merges.remove("<|startoftext|>");
+
+        //std.debug.print("Decoded {d} merges from encoder.json\n", .{merges.count()});
+        //std.debug.print("Decoded {d} ranks from vocab.bpe\n", .{ranks.count()});
+        std.debug.assert(merges.count() == ranks.count());
 
         return .{
             .tokens = ranks,
             .arena = arena,
             .rank_to_token = reversed,
+            .special_tokens = specials,
         };
     }
 
@@ -914,16 +924,49 @@ pub const TikTokenizer = struct {
         //       Tiktokenizer does this by making regex which matches the special tokens [1] and
         //       pattern matching on that, but that strategy isn't really tenable here.
         // [1]: https://github.com/openai/tiktoken/blob/4560a8896f5fb1d35c6f8fd6eee0399f9a1a27ca/src/lib.rs#L246
+        var working = text[0..];
+        const specials = self.special_tokens.keys()[0..self.special_tokens.count()];
+        while (true) {
+            // If we have any special tokens in the
+            if (findFirstMultiple(working, specials)) |match| {
+                const idx = match[0];
+                const special_match = match[1];
+                const special_id = self.special_tokens.get(special_match).?;
 
-        // Break the input text with the GPT-2 regex to get group candidates for BPE.
-        var iter = regex.Gpt2Pattern.init(text);
-        while (iter.next()) |group| {
-            if (self.tokens.get(group)) |token| {
-                // If we have an elementary token, append that
-                try tokens.append(token);
+                // Get buffer between start of working window and first special token occurrence
+                const buf = working[0..idx];
+
+                // Break the input text with the GPT-2 regex to get group candidates for BPE.
+                var iter = regex.Gpt2Pattern.init(buf);
+                while (iter.next()) |group| {
+                    if (self.tokens.get(group)) |token| {
+                        // If we have an elementary token, append that
+                        try tokens.append(token);
+                    } else {
+                        // Otherwise, break down group into individual tokens
+                        try self.encode_piece(group, &tokens, token_alloc);
+                    }
+                }
+
+                // Append special token after tokenized text (where it logically occurred in input)
+                try tokens.append(special_id);
+
+                // Advance working window forward
+                const next_idx = idx + special_match.len;
+                working = working[next_idx..];
             } else {
-                // Otherwise, break down group into individual tokens
-                try self.encode_piece(group, &tokens, token_alloc);
+                // Handle last fragment
+                var iter = regex.Gpt2Pattern.init(working);
+                while (iter.next()) |group| {
+                    if (self.tokens.get(group)) |token| {
+                        // If we have an elementary token, append that
+                        try tokens.append(token);
+                    } else {
+                        // Otherwise, break down group into individual tokens
+                        try self.encode_piece(group, &tokens, token_alloc);
+                    }
+                }
+                break;
             }
         }
 
@@ -1066,15 +1109,16 @@ test "GPT-2 Tokenizer" {
     const h1 = [_]T{ 15496, 11, 1545 };
     const h2 = [_]T{ 15496, 11, 995, 0 };
     const h3 = [_]T{ 40, 1392, 534, 1271, 340, 338, 807, 3134, 12, 20, 26895, 0 };
-    // TODO: Re-enable special tokens test case.
-    //const h4 = [_]T{ 1639, 389, 7062, 50256 };
+    const h4 = [_]T{ 1639, 389, 7062, 50256 };
     const h5 = [_]T{ 464, 1049, 3355, 12520, 100, 109, 318, 287, 12520, 229, 101, 8582, 229, 111 };
+    const h6 = [_]T{ 1639, 389, 7062, 50256, 271, 340, 1107, 996, 50256, 3549, 2420, 994 };
     const cases = [_]struct { []const u8, []const T }{
         .{ "Hello, friend", &h1 },
         .{ "Hello, world!", &h2 },
         .{ "I got your number it's 867-5309!", &h3 },
-        //.{ "You are welcome<|endoftext|>", &h4 },
+        .{ "You are welcome<|endoftext|>", &h4 },
         .{ "The great wall 🧱 is in 🇨🇳", &h5 },
+        .{ "You are welcome<|endoftext|>is it really though<|endoftext|>more text here", &h6 },
     };
 
     for (cases) |case| {
@@ -1088,4 +1132,81 @@ test "GPT-2 Tokenizer" {
         defer alloc.free(decoded);
         try std.testing.expectEqualSlices(u8, input, decoded);
     }
+}
+
+/// Search for the first index and match of an element of `needles` within `haystack` using a naïve
+/// brute force approach.
+/// If no match is found, return `null`.
+/// If two or more elements in `needles` are identical, matches against the first are returned.
+///
+/// Requires that `needles` is a non-empty slice and that each element (or *needle*) is non-empty.
+/// Assumes that `haystack` is a valid UTF-8 sequence.
+fn findFirstMultiple(haystack: []const u8, needles: []const []const u8) ?struct { usize, []const u8 } {
+    // TODO: Use Knuth-Morris-Pratt Algorithm [1] or better to speed this up.
+    // [1]: https://en.wikipedia.org/wiki/Knuth%E2%80%93Morris%E2%80%93Pratt_algorithm
+
+    // Trivial cases
+    if (haystack.len == 0) return null;
+    if (needles.len == 0) return null;
+
+    // Find maximum and minimum needle length
+    var min_needle_len: usize = std.math.maxInt(usize);
+    var max_needle_len: usize = 0;
+    for (needles) |needle| {
+        min_needle_len = @min(min_needle_len, needle.len);
+        max_needle_len = @max(max_needle_len, needle.len);
+    }
+
+    std.debug.assert(min_needle_len != 0);
+
+    // Handle more base cases
+    if (min_needle_len > haystack.len) {
+        return null;
+    }
+
+    // We checked for overflow above, so this is safe now.
+    const end_index = haystack.len - min_needle_len + 1;
+
+    var i: usize = 0;
+    // Iterate each UTF-8 codepoint because we don't want to match in the middle of a codepoint
+    // for equality because that's incorrect.
+    var iter = std.unicode.Utf8Iterator{
+        .bytes = haystack,
+        .i = 0,
+    };
+    while (i <= end_index) {
+        const current = haystack[i..];
+        for (needles) |needle| {
+            if (std.mem.startsWith(u8, current, needle)) {
+                return .{ i, needle };
+            }
+        }
+
+        if (iter.nextCodepoint()) |point| {
+            // Advance forward the proper amount
+            const to_advance = std.unicode.utf8CodepointSequenceLength(point) catch @panic("invalid utf-8 sequence");
+            i += to_advance;
+        } else {
+            // Or advance forward a little bit
+            i += @max(iter.peek(1).len, 1);
+        }
+        if (i >= end_index or i >= haystack.len) break;
+    }
+
+    return null;
+}
+
+test "findFirstMultiple cases" {
+    const needles = [_][]const u8{ "red", "green", "blue" };
+    const haystack = "RGB stands for red-green-blue";
+
+    const match_red = findFirstMultiple(haystack, &needles);
+    try std.testing.expect(match_red != null);
+    try std.testing.expectEqualSlices(u8, "red", match_red.?[1]);
+
+    const real_world = "You are welcome<|endoftext|>";
+    const real_specials = [_][]const u8{"<|endoftext|>"};
+    const real_match = findFirstMultiple(real_world, &real_specials);
+    try std.testing.expect(real_match != null);
+    try std.testing.expectEqualSlices(u8, real_match.?[1], real_specials[0]);
 }

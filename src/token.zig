@@ -920,54 +920,50 @@ pub const TikTokenizer = struct {
         // Best guesstimate
         try tokens.ensureTotalCapacity(text.len / 2);
 
-        // TODO: Add support for special tokens.
-        //       Tiktokenizer does this by making regex which matches the special tokens [1] and
-        //       pattern matching on that, but that strategy isn't really tenable here.
-        // [1]: https://github.com/openai/tiktoken/blob/4560a8896f5fb1d35c6f8fd6eee0399f9a1a27ca/src/lib.rs#L246
+        // Encode the source `text` by sliding a working window through the text and tokenizing
+        // in parts.
+        //
+        // Pay attention and do extra handling for special tokens just like the `tiktoken`
+        // reference implementation.
         var working = text[0..];
         const specials = self.special_tokens.keys()[0..self.special_tokens.count()];
-        while (true) {
-            // If we have any special tokens in the
+        while (working.len != 0) {
+            var special_id: ?Token = null;
+            var next_idx = working.len;
+            var window = working[0..];
+
+            // If we have any special tokens, get the span between start of working buffer and
+            // the special token location. Then set that "clean" span to the current window.
             if (findFirstMultiple(working, specials)) |match| {
                 const idx = match[0];
                 const special_match = match[1];
-                const special_id = self.special_tokens.get(special_match).?;
+                special_id = self.special_tokens.get(special_match);
+                std.debug.assert(special_id != null);
 
-                // Get buffer between start of working window and first special token occurrence
-                const buf = working[0..idx];
-
-                // Break the input text with the GPT-2 regex to get group candidates for BPE.
-                var iter = regex.Gpt2Pattern.init(buf);
-                while (iter.next()) |group| {
-                    if (self.tokens.get(group)) |token| {
-                        // If we have an elementary token, append that
-                        try tokens.append(token);
-                    } else {
-                        // Otherwise, break down group into individual tokens
-                        try self.encode_piece(group, &tokens, token_alloc);
-                    }
-                }
-
-                // Append special token after tokenized text (where it logically occurred in input)
-                try tokens.append(special_id);
-
-                // Advance working window forward
-                const next_idx = idx + special_match.len;
-                working = working[next_idx..];
-            } else {
-                // Handle last fragment
-                var iter = regex.Gpt2Pattern.init(working);
-                while (iter.next()) |group| {
-                    if (self.tokens.get(group)) |token| {
-                        // If we have an elementary token, append that
-                        try tokens.append(token);
-                    } else {
-                        // Otherwise, break down group into individual tokens
-                        try self.encode_piece(group, &tokens, token_alloc);
-                    }
-                }
-                break;
+                // Get portion of window up to special token
+                window = working[0..idx];
+                // How far to advance forward
+                next_idx = idx + special_match.len;
             }
+
+            // Tokenize the current window
+            var iter = regex.Gpt2Pattern.init(window);
+            while (iter.next()) |group| {
+                if (self.tokens.get(group)) |token| {
+                    // If we have an elementary token, append that
+                    try tokens.append(token);
+                } else {
+                    // Otherwise, break down group into individual tokens
+                    try self.encode_piece(group, &tokens, token_alloc);
+                }
+            }
+
+            // Append special token where they belong in original text, after the processed window
+            if (special_id) |id| {
+                try tokens.append(id);
+            }
+            // Move sliding window forward
+            working = working[next_idx..];
         }
 
         return try tokens.toOwnedSlice();
@@ -1112,6 +1108,7 @@ test "GPT-2 Tokenizer" {
     const h4 = [_]T{ 1639, 389, 7062, 50256 };
     const h5 = [_]T{ 464, 1049, 3355, 12520, 100, 109, 318, 287, 12520, 229, 101, 8582, 229, 111 };
     const h6 = [_]T{ 1639, 389, 7062, 50256, 271, 340, 1107, 996, 50256, 3549, 2420, 994 };
+    const h7 = [_]T{ 50256, 1662, 262, 886, 996, 0, 50256 };
     const cases = [_]struct { []const u8, []const T }{
         .{ "Hello, friend", &h1 },
         .{ "Hello, world!", &h2 },
@@ -1119,6 +1116,7 @@ test "GPT-2 Tokenizer" {
         .{ "You are welcome<|endoftext|>", &h4 },
         .{ "The great wall 🧱 is in 🇨🇳", &h5 },
         .{ "You are welcome<|endoftext|>is it really though<|endoftext|>more text here", &h6 },
+        .{ "<|endoftext|>not the end though!<|endoftext|>", &h7 },
     };
 
     for (cases) |case| {
@@ -1197,6 +1195,11 @@ fn findFirstMultiple(haystack: []const u8, needles: []const []const u8) ?struct 
 }
 
 test "findFirstMultiple cases" {
+    const no_needles = "© There is no spoon 　";
+    const missing_needles = [_][]const u8{"<|tag|>"};
+    const no_match = findFirstMultiple(no_needles, &missing_needles);
+    try std.testing.expect(no_match == null);
+
     const needles = [_][]const u8{ "red", "green", "blue" };
     const haystack = "RGB stands for red-green-blue";
 
@@ -1209,4 +1212,12 @@ test "findFirstMultiple cases" {
     const real_match = findFirstMultiple(real_world, &real_specials);
     try std.testing.expect(real_match != null);
     try std.testing.expectEqualSlices(u8, real_match.?[1], real_specials[0]);
+    try std.testing.expectEqual(15, real_match.?[0]);
+
+    const uni_world = "© 2025 　<|tag|>";
+    const uni_specials = [_][]const u8{"<|tag|>"};
+    const uni_match = findFirstMultiple(uni_world, &uni_specials);
+    try std.testing.expect(uni_match != null);
+    try std.testing.expectEqualSlices(u8, uni_match.?[1], uni_specials[0]);
+    try std.testing.expectEqual(11, uni_match.?[0]);
 }

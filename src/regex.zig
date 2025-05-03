@@ -128,8 +128,12 @@ pub const Gpt2Pattern = struct {
                     // Backtrack required
                     .apostrophe_rv, .apostrophe_l => {
                         // Emit single apostrophe
+                        //
                         // Backtrack and emit the trailing character after the apostrophe as
                         // its own match.
+                        //
+                        // We can assume the last character was 1 byte long because we are
+                        // currently matching on the partial string 'r, 'v, or 'l.
                         self.backtrack(start, 1);
                         self.*.state = .end;
                         continue;
@@ -150,7 +154,7 @@ pub const Gpt2Pattern = struct {
             //std.debug.print("got character {d} at {d}\n", .{ chr, self.cursor });
 
             // After consuming character, move forward cursor
-            self.*.cursor += 1;
+            self.*.cursor += chr_len;
 
             // Heart of the regular expression matcher. This switches on the current state and
             // operates on the last byte consumed.
@@ -185,6 +189,7 @@ pub const Gpt2Pattern = struct {
                     if (isWhitespace(chr)) {
                         // keep going
 
+                        // TODO: this is broken for multi-byte chars
                         // Lookahead past next token and see if following token is whitespace
                         // or not
                         if (self.cursor + 2 < self.buf.len) {
@@ -197,7 +202,7 @@ pub const Gpt2Pattern = struct {
                         }
                     } else {
                         // backtrack by one and then emit match
-                        self.backtrack(start, 1);
+                        self.backtrack(start, chr_len);
                     }
                 },
                 .apostrophe => {
@@ -209,7 +214,7 @@ pub const Gpt2Pattern = struct {
                         self.*.state = .apostrophe_l;
                     } else {
                         self.*.state = .not_space_letter_numeric;
-                        self.backtrack(start, 1);
+                        self.backtrack(start, chr_len);
                     }
                 },
                 .apostrophe_rv => {
@@ -217,7 +222,8 @@ pub const Gpt2Pattern = struct {
                         self.*.state = .end;
                     } else {
                         self.*.state = .not_space_letter_numeric;
-                        self.backtrack(start, 2);
+                        // backtrack current non-matching char + r/v
+                        self.backtrack(start, chr_len + 1);
                     }
                 },
                 .apostrophe_l => {
@@ -225,7 +231,8 @@ pub const Gpt2Pattern = struct {
                         self.*.state = .end;
                     } else {
                         self.*.state = .not_space_letter_numeric;
-                        self.backtrack(start, 2);
+                        // backtrack current non-matching char + l
+                        self.backtrack(start, chr_len + 1);
                     }
                 },
                 .letters => {
@@ -233,7 +240,7 @@ pub const Gpt2Pattern = struct {
                         // keep going;
                     } else {
                         self.*.state = .end;
-                        self.backtrack(start, 1);
+                        self.backtrack(start, chr_len);
                     }
                 },
                 .numbers => {
@@ -241,13 +248,13 @@ pub const Gpt2Pattern = struct {
                         // keep going
                     } else {
                         self.*.state = .end;
-                        self.backtrack(start, 1);
+                        self.backtrack(start, chr_len);
                     }
                 },
                 .not_space_letter_numeric => {
                     if (isLetter(chr) or isNumber(chr) or isWhitespace(chr)) {
                         self.*.state = .end;
-                        self.backtrack(start, 1);
+                        self.backtrack(start, chr_len);
                     } else {
                         // Keep going
                     }
@@ -344,6 +351,10 @@ test "match GPT2 tokenization groups" {
     const mixed = "I got your number it's 867-5309!";
     const mixed_exp = [_][]const u8{ "I", " got", " your", " number", " it", "'s", " 867", "-", "5309", "!" };
     try verify(mixed, &mixed_exp);
+
+    const multi_char = "The great wall 🧱 is in 🇨🇳";
+    const multi_char_exp = [_][]const u8{ "The", " great", " wall", " 🧱", " is", " in", " 🇨🇳" };
+    try verify(multi_char, &multi_char_exp);
 }
 
 // implementations of various helper functions for matching against unicode groups

@@ -1068,11 +1068,13 @@ test "GPT-2 Tokenizer" {
     const h3 = [_]T{ 40, 1392, 534, 1271, 340, 338, 807, 3134, 12, 20, 26895, 0 };
     // TODO: Re-enable special tokens test case.
     //const h4 = [_]T{ 1639, 389, 7062, 50256 };
+    const h5 = [_]T{ 464, 1049, 3355, 12520, 100, 109, 318, 287, 12520, 229, 101, 8582, 229, 111 };
     const cases = [_]struct { []const u8, []const T }{
         .{ "Hello, friend", &h1 },
         .{ "Hello, world!", &h2 },
         .{ "I got your number it's 867-5309!", &h3 },
         //.{ "You are welcome<|endoftext|>", &h4 },
+        .{ "The great wall 🧱 is in 🇨🇳", &h5 },
     };
 
     for (cases) |case| {

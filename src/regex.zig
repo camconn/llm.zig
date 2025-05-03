@@ -187,22 +187,39 @@ pub const Gpt2Pattern = struct {
                 },
                 .whitespace => {
                     if (isWhitespace(chr)) {
-                        // keep going
+                        // Lookahead to see if next char is whitespace and if the following token
+                        // is not whitespace. If so, then emit the current match.
+                        // Otherwise, keep going
+                        if (self.peekOffset(self.cursor)) |result1| {
+                            const peek1 = result1[0];
+                            const index = result1[1];
 
-                        // TODO: this is broken for multi-byte chars
-                        // Lookahead past next token and see if following token is whitespace
-                        // or not
-                        if (self.cursor + 2 < self.buf.len) {
-                            const peek1 = self.buf[self.cursor];
-                            const peek2 = self.buf[self.cursor + 1];
-
-                            if (isWhitespace(peek1) and !isWhitespace(peek2)) {
+                            if (!isWhitespace(peek1)) {
+                                // This is only possible whenever we start matching on a buffer
+                                // like "SWN" where "S" is SPACE, W is any whitespace character,
+                                // and "N" is a non-whitespace character.
+                                // To reach this point we are currently on `chr` == `W`.
+                                //
+                                // Backtrack 1 code point and emit the group "S".
+                                self.backtrack(start, chr_len);
                                 self.*.state = .end;
+                                continue;
+                            }
+
+                            if (self.peekOffset(index)) |result2| {
+                                const peek2 = result2[0];
+
+                                if (isWhitespace(peek1) and !isWhitespace(peek2)) {
+                                    self.*.state = .end;
+                                }
                             }
                         }
                     } else {
-                        // backtrack by one and then emit match
+                        // backtrack by one to exclude non-whitespace char and then emit match
+                        // NB: This is only possible whenever a whitespace char != 0x20 precedes
+                        //     a non-whitespace char.
                         self.backtrack(start, chr_len);
+                        self.*.state = .end;
                     }
                 },
                 .apostrophe => {
@@ -273,15 +290,50 @@ pub const Gpt2Pattern = struct {
         std.debug.assert(start + amount <= self.*.cursor);
         self.*.cursor -= amount;
     }
+
+    /// Peek at the next Unicode character in the buffer starting at `offset`.
+    /// Returns the codepoint and ending offset in the buffer string otherwise.
+    /// Returns `null` if a read would extend past the end of the buffer, and
+    /// Assumes the buffer string is valid UTF-8.
+    fn peekOffset(self: Self, offset: usize) ?struct { u21, usize } {
+        if (offset >= self.buf.len) {
+            return null;
+        }
+
+        // Check length of next codepoint
+        const len = unicode.calcFirstCodepointUnicodeLen(self.buf[offset..]) catch 0;
+        if (len == 0) {
+            // TODO(error): We know we have invalid UTF-8 at this point.
+            return null;
+        }
+
+        // Check that we have room to check the next codepoint
+        const ending = offset + len;
+        if (ending > self.buf.len) {
+            // TODO(error): We know we have invalid UTF-8 at this point.
+            return null;
+        }
+
+        // Check the codepoint and ensure we don't have a decode error.
+        const char = unicode.decodeUtf8First(self.buf[offset..ending]) catch 0;
+        if (char == 0) {
+            // TODO(error): We know we have invalid UTF-8 at this point.
+            return null;
+        }
+
+        return .{ char, ending };
+    }
 };
 
 test "match GPT2 tokenization groups" {
     const verify = struct {
         fn check(src: []const u8, exp: []const []const u8) !void {
+            //std.debug.print("Verifying <<{s}>>\n", .{src});
             var iter = Gpt2Pattern.init(src);
             for (exp) |group| {
                 const next = iter.next();
                 try std.testing.expect(next != null);
+                //std.debug.print("got match <<{s}>> (len {d})\n", .{ next.?, next.?.len });
                 try std.testing.expectEqualSlices(u8, group, next.?);
             }
             try std.testing.expectEqual(null, iter.next());
@@ -355,6 +407,20 @@ test "match GPT2 tokenization groups" {
     const multi_char = "The great wall 🧱 is in 🇨🇳";
     const multi_char_exp = [_][]const u8{ "The", " great", " wall", " 🧱", " is", " in", " 🇨🇳" };
     try verify(multi_char, &multi_char_exp);
-}
 
-// implementations of various helper functions for matching against unicode groups
+    const varied_ws = "This string has \u{2000}\u{2008}multichar whitespaces";
+    const varied_ws_exp = [_][]const u8{ "This", " string", " has", " \u{2000}", "\u{2008}", "multichar", " whitespaces" };
+    try verify(varied_ws, &varied_ws_exp);
+
+    const varied_ws2 = "This also has \u{2000} multichar whitespaces";
+    const varied_ws2_exp = [_][]const u8{ "This", " also", " has", " \u{2000}", " multichar", " whitespaces" };
+    try verify(varied_ws2, &varied_ws2_exp);
+
+    const varied_ws3 = "This also has\u{2000}\u{2008} multichar.";
+    const varied_ws3_exp = [_][]const u8{ "This", " also", " has", "\u{2000}\u{2008}", " multichar", "." };
+    try verify(varied_ws3, &varied_ws3_exp);
+
+    const varied_ws4 = "This also has \u{2000}\u{2008} multichar.";
+    const varied_ws4_exp = [_][]const u8{ "This", " also", " has", " \u{2000}\u{2008}", " multichar", "." };
+    try verify(varied_ws4, &varied_ws4_exp);
+}

@@ -98,7 +98,15 @@ pub const Gpt2Pattern = struct {
             return null;
         }
 
+        var iters: usize = 0;
+        // Cap the iteration limit at n*4 to account for backtracking.
+        const iter_limit = (self.buf.len - self.cursor) * 4;
         while (true) {
+            iters += 1;
+            if (iters >= iter_limit) {
+                @panic("Iteration limit exceeded. A hanging match may be occurring, this is probably a library bug.");
+            }
+
             //std.debug.print("state: {any}; cursor: {d}\n", .{ self.*.state, self.*.cursor });
             // Check if we're at the end... If we are, go ahead and emit the match
             if (self.*.state == .end) {
@@ -146,8 +154,9 @@ pub const Gpt2Pattern = struct {
             if (chr_len == 0) {
                 @panic("next codepoint failed to calculate length");
             }
-            const chr = unicode.decodeUtf8First(self.buf[self.cursor..]) catch 0;
+            const chr = unicode.decodeUtf8First(b) catch 0;
             if (chr == 0) {
+                std.debug.print("buf: {d}, <<{s}>>\n", .{ b, b });
                 @panic("Invalid decode");
             }
 
@@ -423,4 +432,54 @@ test "match GPT2 tokenization groups" {
     const varied_ws4 = "This also has \u{2000}\u{2008} multichar.";
     const varied_ws4_exp = [_][]const u8{ "This", " also", " has", " \u{2000}\u{2008}", " multichar", "." };
     try verify(varied_ws4, &varied_ws4_exp);
+
+    const v_weird = "V՟";
+    const v_weird_exp = [_][]const u8{ "V", "՟" };
+    try verify(v_weird, &v_weird_exp);
+}
+
+test "Gpt2Pattern fuzz" {
+    const fuzzer = struct {
+        fn fuzz(_: void, buf: []const u8) !void {
+            // Only accept valid UTF-8
+            const cleaned = if (std.mem.indexOf(u8, buf, "\u{0000}")) |i| buf[0..i] else buf;
+            if (!std.unicode.utf8ValidateSlice(cleaned)) return;
+
+            var matcher = Gpt2Pattern.init(cleaned);
+            var sum: usize = 0;
+
+            var matches = std.ArrayList([]const u8).init(std.testing.allocator);
+            defer matches.deinit();
+
+            while (matcher.next()) |group| {
+                sum += group.len;
+                try matches.append(group);
+            }
+
+            if (matcher.next() != null) {
+                std.debug.print("Changed ending: {s}\n", .{cleaned});
+                return error.ChangedEnding;
+            }
+
+            if (sum != cleaned.len) {
+                std.debug.print("Missing groups:\n", .{});
+                std.debug.print("Cleaned: <<{s}>>\n", .{cleaned});
+                std.debug.print("Cleaned: <<{d}>>\n", .{cleaned});
+                for (matches.items) |group| {
+                    std.debug.print("group: <<{s}>>\n", .{group});
+                }
+                return error.Missing;
+            }
+        }
+    }.fuzz;
+
+    // Currently broken in zig 0.14.0
+    //try std.testing.fuzz({}, fuzzer, .{ .corpus = &.{
+    //    "",
+    //    "Hello, world!",
+    //    "This is a test",
+    //    "This also has\u{2000}\u{2008} multichars.",
+    //    "The great wall 🧱 is in 🇨🇳",
+    //} });
+    try std.testing.fuzz({}, fuzzer, .{});
 }

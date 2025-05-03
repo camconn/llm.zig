@@ -11,6 +11,12 @@
 
 const std = @import("std");
 
+const llm = @import("root.zig");
+const unicode = llm.unicode;
+const isLetter = unicode.isLetter;
+const isNumber = unicode.isNumber;
+const isWhitespace = unicode.isWhitespace;
+
 // Matches the literal strings
 // 's
 // 't
@@ -132,11 +138,11 @@ pub const Gpt2Pattern = struct {
             }
 
             const b = self.buf[self.cursor..];
-            const chr_len = calcFirstCodepointUnicodeLen(b) catch 0;
+            const chr_len = unicode.calcFirstCodepointUnicodeLen(b) catch 0;
             if (chr_len == 0) {
                 @panic("next codepoint failed to calculate length");
             }
-            const chr = decodeUtf8First(self.buf[self.cursor..]) catch 0;
+            const chr = unicode.decodeUtf8First(self.buf[self.cursor..]) catch 0;
             if (chr == 0) {
                 @panic("Invalid decode");
             }
@@ -341,172 +347,3 @@ test "match GPT2 tokenization groups" {
 }
 
 // implementations of various helper functions for matching against unicode groups
-
-/// List of Unicode characters obtained from Wikipedia [1].
-/// [1]: https://en.wikipedia.org/wiki/Whitespace_character#Unicode
-const ws_chars = [_]u21{
-    0x0009,
-    0x000A,
-    0x000B,
-    0x000C,
-    0x000D,
-    0x0020,
-    0x0085,
-    0x00A0,
-    0x1680,
-    0x2000,
-    0x2001,
-    0x2002,
-    0x2003,
-    0x2004,
-    0x2005,
-    0x2006,
-    0x2007,
-    0x2008,
-    0x2009,
-    0x200A,
-    0x2028,
-    0x2029,
-    0x202F,
-    0x205F,
-    0x3000,
-};
-
-// TODO: Benchmark this, it may be too slow.
-/// Determine if `src` is a whitespace Unicode codepoint.
-fn isWhitespace(src: u21) bool {
-    // Don't binary search, just use linear search because we expect to see the lower value
-    // chars (space, newline, carriage return, tab) most of the time.
-    if (std.mem.indexOfScalar(u21, &ws_chars, src)) |_| {
-        return true;
-    }
-    return false;
-}
-
-test "isWhitespace" {
-    try std.testing.expectEqual(true, isWhitespace(' '));
-    try std.testing.expectEqual(true, isWhitespace('\r'));
-    try std.testing.expectEqual(true, isWhitespace('\n'));
-    try std.testing.expectEqual(true, isWhitespace('\t'));
-    try std.testing.expectEqual(false, isWhitespace('A'));
-    try std.testing.expectEqual(false, isWhitespace(0));
-}
-
-/// Determine if `src` is a letter Unicode codepoint.
-fn isLetter(src: u21) bool {
-    // TODO: Find if in class `L` which is `Lu` | `Ll` | `Lt` | `Lm` | `Lo`
-    // https://www.unicode.org/versions/Unicode16.0.0/core-spec/chapter-4/#G134153
-
-    const a: u21 = 'a';
-    const z: u21 = 'z';
-    const A: u21 = 'A';
-    const Z: u21 = 'Z';
-
-    const lower = a <= src and src <= z;
-    const upper = A <= src and src <= Z;
-
-    return lower or upper;
-}
-
-test "isLetter" {
-    try std.testing.expectEqual(true, isLetter('a'));
-    try std.testing.expectEqual(true, isLetter('z'));
-    try std.testing.expectEqual(true, isLetter('A'));
-    try std.testing.expectEqual(true, isLetter('Z'));
-    try std.testing.expectEqual(true, isLetter('o'));
-    try std.testing.expectEqual(true, isLetter('h'));
-    try std.testing.expectEqual(true, isLetter('a'));
-    try std.testing.expectEqual(true, isLetter('i'));
-
-    try std.testing.expectEqual(false, isLetter('0'));
-    try std.testing.expectEqual(false, isLetter('\n'));
-    try std.testing.expectEqual(false, isLetter(0));
-}
-
-/// Determine if `src` is a numeric Unicode codepoint.
-fn isNumber(src: u21) bool {
-    // TODO: Find if in class `N` which is `Nd` | `Nl` | `No`
-    // https://www.unicode.org/versions/Unicode16.0.0/core-spec/chapter-4/#G134153
-    const zero: u21 = '0';
-    const nine: u21 = '9';
-    const numeric = zero <= src and src <= nine;
-
-    // TODO: Add other qualifiers
-
-    return numeric;
-}
-
-/// Calculate the length of the first unicode codepoint in the provided string.
-/// Assumes the string is a valid UTF-8 string and does not end prematurely.
-fn calcFirstCodepointUnicodeLen(str: []const u8) !usize {
-    const top_bit = 0x80;
-    const leading_bits = 0xC0;
-
-    // Trivial case first for single-byte
-    if (str.len < 1) {
-        return error.Empty;
-    }
-    if (str[0] & 0x80 == 0) {
-        return 1;
-    }
-
-    // Decode length of codepoint from the bitmask for leading byte.
-    var size: usize = 0;
-    // bits to check
-    const masks = [_]u8{
-        0b1110_0000,
-        0b1111_0000,
-        0b1111_1000,
-    };
-    // what we expect when performing bitwise AND against leading byte
-    const good_mask = [_]u8{
-        0b1100_0000,
-        0b1110_0000,
-        0b1111_0000,
-    };
-    const leading = str[0];
-    for (0.., masks) |i, mask| {
-        if (leading & mask == good_mask[i]) {
-            size = i + 2;
-        }
-    }
-
-    // Check that we found a matching bitmask
-    if (size == 0) {
-        // Invalid unicode
-        return error.Unicode;
-    }
-
-    for (1..size) |i| {
-        if (str[i] & leading_bits != top_bit) {
-            std.debug.print("Invalid byte at index {d} in {d}\n", .{ i, str });
-            return error.Unicode;
-        }
-    }
-
-    return size;
-}
-
-test "calcFirstCodepointUnicodeLen" {
-    try std.testing.expectError(error.Empty, calcFirstCodepointUnicodeLen(""));
-    try std.testing.expectEqual(1, try calcFirstCodepointUnicodeLen("asdf"));
-    try std.testing.expectEqual(1, try calcFirstCodepointUnicodeLen("Hello, world"));
-    try std.testing.expectEqual(2, try calcFirstCodepointUnicodeLen("Ġ"));
-    try std.testing.expectEqual(2, try calcFirstCodepointUnicodeLen("Ġhello"));
-    try std.testing.expectEqual(3, try calcFirstCodepointUnicodeLen("你好"));
-    try std.testing.expectEqual(4, try calcFirstCodepointUnicodeLen("🇺"));
-    try std.testing.expectEqual(4, try calcFirstCodepointUnicodeLen("🇸"));
-    try std.testing.expectEqual(4, try calcFirstCodepointUnicodeLen("🇺🇸"));
-}
-
-fn decodeUtf8First(str: []const u8) !u21 {
-    const len = try calcFirstCodepointUnicodeLen(str);
-
-    return switch (len) {
-        1 => str[0],
-        2 => std.unicode.utf8Decode2(str[0..2].*),
-        3 => std.unicode.utf8Decode3(str[0..3].*),
-        4 => std.unicode.utf8Decode4(str[0..4].*),
-        else => @panic("Invalid calculated length"),
-    };
-}

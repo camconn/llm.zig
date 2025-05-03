@@ -86,6 +86,10 @@ The code in `llm.zig` is licensed under the GNU Public License Version 3 or any
 later version at your choosing. A copy of this license is located in
 `LICENSE.txt`.
 
+A copy of the Unicode Character Database (UCD) for Unicode Version 16.0.0 is included with this program for
+unit testing. A copy of the Unicode license is located in `LICENSE-UNICODE.txt`.
+The UCD file is located at `src/assets/unicode-16.0.0.txt`.
+
 # TODO
 - Nanogpt or mingpt
     - Probably going to do nano

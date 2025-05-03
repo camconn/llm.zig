@@ -14,6 +14,7 @@ pub const math = @import("math.zig");
 pub const regex = @import("regex.zig");
 pub const sample = @import("sample.zig");
 pub const token = @import("token.zig");
+pub const unicode = @import("unicode.zig");
 
 test "Top level test reference" {
     const std = @import("std");

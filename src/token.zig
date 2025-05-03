@@ -676,6 +676,7 @@ pub const TikTokenizer = struct {
     /// `allocator`.
     pub fn init(file: ggml.GGUFFile, allocator: Allocator) !TikTokenizer {
         const tokenizer_model = file.getValue(tokenizer_key).?.string;
+        // TODO: Swap regex pattern based on support tokenizer_model string.
         if (!std.mem.eql(u8, tokenizer_model.str, "gpt2")) {
             std.debug.print("Found non-GPT tokenizer model: {s}\n", .{tokenizer_model.str});
             return error.WrongTokenizer;
@@ -739,9 +740,8 @@ pub const TikTokenizer = struct {
     fn loadDataToBPERanks(
         bpe_reader: anytype,
         encoder_reader: anytype,
+        special_tokens: Ranks,
         allocator: std.mem.Allocator,
-        //bpe_hash: ?[]const u8,
-        //encoder_hash: ?[]const u8,
     ) !TikTokenizer {
         var arena = ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -814,6 +814,13 @@ pub const TikTokenizer = struct {
         //std.debug.print("Decoded {d} merges from encoder.json\n", .{merges.count()});
         //std.debug.print("Decoded {d} ranks from vocab.bpe\n", .{ranks.count()});
         std.debug.assert(merges.count() == ranks.count());
+
+        // Add special tokens
+        _ = special_tokens;
+        //var special_iter = special_tokens.iterator();
+        //while (special_iter.next()) |next| {
+        //    try ranks.put(next.key_ptr.*, next.value_ptr.*);
+        //}
 
         // Create a reversed mapping of Token to String
         var reversed = std.AutoHashMap(Rank, []const u8).init(alloc);
@@ -900,7 +907,13 @@ pub const TikTokenizer = struct {
     pub fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Token {
         var tokens = TokenList.init(token_alloc);
         defer tokens.deinit();
+        // Best guesstimate
         try tokens.ensureTotalCapacity(text.len / 2);
+
+        // TODO: Add support for special tokens.
+        //       Tiktokenizer does this by making regex which matches the special tokens [1] and
+        //       pattern matching on that, but that strategy isn't really tenable here.
+        // [1]: https://github.com/openai/tiktoken/blob/4560a8896f5fb1d35c6f8fd6eee0399f9a1a27ca/src/lib.rs#L246
 
         // Break the input text with the GPT-2 regex to get group candidates for BPE.
         var iter = regex.Gpt2Pattern.init(text);
@@ -1040,7 +1053,11 @@ test "GPT-2 Tokenizer" {
 
     const alloc = std.testing.allocator;
 
-    var tokenizer = try TikTokenizer.loadDataToBPERanks(vocab, encoder, alloc);
+    var special_tokens = TikTokenizer.Ranks.init(alloc);
+    defer special_tokens.deinit();
+    try special_tokens.put("<|endoftext|>", 50256);
+
+    var tokenizer = try TikTokenizer.loadDataToBPERanks(vocab, encoder, special_tokens, alloc);
     defer tokenizer.deinit();
 
     // Find these values from [1] or derive them manually with the `tiktoken` Python library
@@ -1049,10 +1066,13 @@ test "GPT-2 Tokenizer" {
     const h1 = [_]T{ 15496, 11, 1545 };
     const h2 = [_]T{ 15496, 11, 995, 0 };
     const h3 = [_]T{ 40, 1392, 534, 1271, 340, 338, 807, 3134, 12, 20, 26895, 0 };
+    // TODO: Re-enable special tokens test case.
+    //const h4 = [_]T{ 1639, 389, 7062, 50256 };
     const cases = [_]struct { []const u8, []const T }{
         .{ "Hello, friend", &h1 },
         .{ "Hello, world!", &h2 },
         .{ "I got your number it's 867-5309!", &h3 },
+        //.{ "You are welcome<|endoftext|>", &h4 },
     };
 
     for (cases) |case| {

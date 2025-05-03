@@ -167,11 +167,6 @@ pub fn rmsNorm(out: []f32, x: []const f32, y: []const f32) void {
 /// [1]: https://arxiv.org/abs/1910.07467
 pub fn rmsNormT(T: type, out: []T, x: []const T, y: []const T) void {
     floatOnly(T);
-    //switch (@typeInfo(T)) {
-    //    .float => {},
-    //    else => @compileError("rmsNormT is only supported for floating point types "),
-    //}
-
     if (!(x.len == y.len and y.len == out.len)) {
         std.debug.print("lengths: out={d}, x={d}, y={d}\n", .{ out.len, x.len, y.len });
         std.debug.assert(out.len == x.len);
@@ -296,18 +291,6 @@ pub fn softMax(x: []f32) void {
     for (leftover_offset..x.len) |i| {
         x[i] /= sum;
     }
-
-    //var sum: f32 = 0;
-    //for (0..x.len) |i| {
-    //    const val = @exp(x[i] - max_val);
-    //    sum += val;
-    //    x[i] = val;
-    //}
-
-    //// normalize
-    //for (0..x.len) |i| {
-    //    x[i] /= sum;
-    //}
 }
 
 test "softMax" {
@@ -322,6 +305,132 @@ test "softMax" {
     for (0.., x) |i, xv| {
         try std.testing.expectApproxEqAbs(expected[i], xv, eps);
     }
+}
+
+/// Perform layer normalization [1] on `x` with weights `w` and bias `b`, with scratchpad `scratch`.
+/// Requires all input slices have the same length.
+/// Obliterates any data currently stored on `scratch`.
+/// [1]: https://arxiv.org/abs/1607.06450
+pub fn layerNorm(T: type, x: []T, w: []T, b: []T, scratch: []T) void {
+    floatOnly(T);
+    std.debug.assert(x.len == w.len);
+    std.debug.assert(w.len == b.len);
+    std.debug.assert(b.len == scratch.len);
+
+    // Now perform scaling an biasing by the weights and biases.
+    const Vec = comptime Vect(T);
+    const vector_len = vectLen(Vec);
+
+    const len = x.len;
+    const chunks = len / vector_len;
+    const leftover_idx = len - chunks * vector_len;
+
+    const avg = mean(T, x);
+    const varnce = variance(T, x, scratch);
+
+    const eps_c = 0.00001;
+    const eps: Vec = @splat(eps_c);
+    const mu: Vec = @splat(@as(T, @floatCast(avg)));
+    const vs: Vec = @splat(@as(T, @floatCast(varnce)));
+    for (0..chunks) |i| {
+        const idx = i * vector_len;
+        const xs: Vec = x[idx .. idx + vector_len].*;
+        const gamma: Vec = w[idx .. idx + vector_len].*;
+        const beta: Vec = b[idx .. idx + vector_len].*;
+
+        const numerator = (xs - mu) * gamma;
+        const denominator = @sqrt(vs + eps);
+
+        const out = numerator / denominator + beta;
+        x[idx .. idx + vector_len].* = out;
+    }
+
+    for (leftover_idx..len) |i| {
+        const numerator = (x[i] - @as(T, @floatCast(avg))) * w[i];
+        const denominator = @sqrt(scratch[i] + eps_c);
+        x[i] = numerator / denominator + b[i];
+    }
+}
+
+/// Calculate the population variance of `x` using scratchpad space `scratch`.
+/// Requires all input slices have the same length.
+/// Overwrites any data currently on `scratch`.
+pub fn variance(T: type, x: []const T, scratch: []T) f32 {
+    floatOnly(T);
+    const Vec = comptime Vect(T);
+    const vector_len = comptime vectLen(Vec);
+
+    const len = x.len;
+    const chunks = len / vector_len;
+    const leftover_idx = chunks * vector_len;
+
+    const avg = mean(T, x);
+    const mu: Vec = @splat(@as(T, @floatCast(avg)));
+    for (0..chunks) |i| {
+        const idx = i * vector_len;
+        const xs = x[idx .. idx + vector_len][0..vector_len].*;
+
+        const diff = xs - mu;
+        const square = diff * diff;
+
+        scratch[idx .. idx + vector_len][0..vector_len].* = square;
+    }
+
+    for (leftover_idx..len) |i| {
+        const diff = x[i] - avg;
+        scratch[i] = diff * diff;
+    }
+
+    return mean(T, scratch);
+}
+
+test "population variance" {
+    const xs1 = [_]f32{
+        1.5000, -0.5000, 0.2500, -0.3300, 0.5000, -0.2800,
+    };
+    var scratch1 = [_]f32{0} ** 6;
+    try std.testing.expectApproxEqAbs(0.463867, variance(f32, &xs1, &scratch1), 0.0001);
+
+    const xs2 = [_]f32{
+        0.782705,    0.0185241,  -1.3987473,  2.558082,    1.0357028,
+        -0.26164263, -1.0256457, 0.31200355,  -0.00951786, -0.58689433,
+        0.6750471,   0.29773685, -0.46356103, -0.9778625,  -0.83633673,
+        -0.14195803, -1.2546383, -0.53481174, -0.745961,   -1.1854576,
+    };
+    var scratch2 = [_]f32{0} ** 20;
+    try std.testing.expectApproxEqAbs(0.8652293, variance(f32, &xs2, &scratch2), 0.0001);
+}
+
+/// Calculate the arithmetic mean of `x` with type `T`.
+pub fn mean(T: type, x: []const T) f32 {
+    floatOnly(T);
+    const Vec = comptime Vect(T);
+    const vector_len = comptime vectLen(Vec);
+
+    const len = x.len;
+    const chunks = len / vector_len;
+
+    const leftover_idx = chunks * vector_len;
+    var sum: f32 = 0;
+    for (0..chunks) |i| {
+        const idx = i * vector_len;
+        const xs: Vec = x[idx .. idx + vector_len][0..vector_len].*;
+        const xs_sum = @reduce(.Add, xs);
+        sum += @floatCast(xs_sum);
+    }
+
+    for (leftover_idx..len) |i| {
+        sum += @floatCast(x[i]);
+    }
+
+    return sum / @as(f32, @floatFromInt(len));
+}
+
+test "mean spot check" {
+    const xs1 = [_]f32{
+        1.5000, -0.5000, 0.2500, -0.3300, 0.5000, -0.2800,
+    };
+    try std.testing.expectApproxEqAbs(0.19, mean(f32, &xs1), 0.0001);
 }
 
 /// Calculate swiglu(x) and store that back into x.

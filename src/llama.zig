@@ -774,11 +774,11 @@ pub const TransformerV1 = struct {
             else
                 Weights{ .f32 = state.work };
             // xq = wq(x)
-            math.matrixMul(state.q, layer.wq, wts, dim, dim);
+            math.matrixMulVec(f32, state.q, layer.wq, wts, dim, dim);
             // xk = wk(x)
-            math.matrixMul(state.k, layer.wk, wts, kv_dim, dim);
+            math.matrixMulVec(f32, state.k, layer.wk, wts, kv_dim, dim);
             // xv = wv(x)
-            math.matrixMul(state.v, layer.wv, wts, kv_dim, dim);
+            math.matrixMulVec(f32, state.v, layer.wv, wts, kv_dim, dim);
 
             // RoPE
             //     xq, xk = apply_rotary_emb(xq, xk, freq_cs, freq_ss)
@@ -810,7 +810,7 @@ pub const TransformerV1 = struct {
                 _ = math.quantize(.q8_0, state.work, state.quant_vec.q8_0) catch
                     @panic("Issue quantizing after attention");
             }
-            math.matrixMul(state.work2[0..dim], layer.wo, wts, dim, dim);
+            math.matrixMulVec(f32, state.work2[0..dim], layer.wo, wts, dim, dim);
             // End of Attention.forward(x);
 
             // We are back in TransformerBlock.forward(x, freq_cs, freq_ss). We just need to add
@@ -835,22 +835,21 @@ pub const TransformerV1 = struct {
             }
 
             // hid1 = w1(x)
-            math.matrixMul(state.hidden1, layer.w1, wts, c.hidden_dim, dim);
+            math.matrixMulVec(f32, state.hidden1, layer.w1, wts, c.hidden_dim, dim);
             // hid2 = w3(x)
-            math.matrixMul(state.hidden2, layer.w3, wts, c.hidden_dim, dim);
+            math.matrixMulVec(f32, state.hidden2, layer.w3, wts, c.hidden_dim, dim);
 
             // Calculate SwiGLU
             math.swiglu(state.hidden1);
             math.elementProduct(state.hidden1, state.hidden1, state.hidden2);
 
+            // w2 * (swiglu(w1(x)) * w3(x))
             if (c.quantized) {
-                // w2 * (swiglu(w2(x)) * w3(x))
                 _ = math.quantize(.q8_0, state.hidden1, state.quant_vec2.q8_0) catch
                     @panic("Error during quantization");
             }
             const wts_hidden: Weights = if (c.quantized) state.quant_vec2 else Weights{ .f32 = state.hidden1 };
-            // w2 * (swiglu(w2(x)) * w3(x))
-            math.matrixMul(state.work, layer.w2, wts_hidden, dim, c.hidden_dim);
+            math.matrixMulVec(f32, state.work, layer.w2, wts_hidden, dim, c.hidden_dim);
             // Done with FeedForward.forward(x)
 
             // Add back `h` to result of FeedForward.forward(x)
@@ -877,7 +876,7 @@ pub const TransformerV1 = struct {
                 @panic("Error during quantization");
         }
         const norm_output: Weights = if (c.quantized) state.quant_vec else Weights{ .f32 = state.input };
-        math.matrixMul(state.output, self.classifier, norm_output, c.vocab_size, dim);
+        math.matrixMulVec(f32, state.output, self.classifier, norm_output, c.vocab_size, dim);
 
         if (progress) |prog| {
             prog.completeOne();

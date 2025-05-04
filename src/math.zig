@@ -567,7 +567,7 @@ pub fn elementProduct(out: []f32, x: []const f32, y: []const f32) void {
 /// Multiply a matrix `m` of (`rows`, `cols`) by a vector `x` of (`cols`) and store in `out`.
 /// Requires that the quantization format of `m` and `x` are the same. You can check this with
 /// `same(m, x)`.
-pub fn matrixMul(out: []f32, m: Weights, x: Weights, rows: usize, cols: usize) void {
+pub fn matrixMulVec(T: type, out: []T, m: Weights, x: Weights, rows: usize, cols: usize) void {
     const x_len = switch (x) {
         .f32 => |f| f.len,
         .f16 => |f| f.len,
@@ -586,14 +586,14 @@ pub fn matrixMul(out: []f32, m: Weights, x: Weights, rows: usize, cols: usize) v
 
     // Poor man's dynamic dispatch
     switch (m) {
-        .f32 => matrixMul_f32(out, m.f32, x.f32, rows, cols),
+        .f32 => matrixMulVec_f32(T, out, m.f32, x.f32, rows, cols),
         .f16 => @panic("unimplemented"),
-        .q8_0 => matrixMul_q8_0(out, m.q8_0, x.q8_0, rows, cols),
+        .q8_0 => matrixMulVec_q8_0(T, out, m.q8_0, x.q8_0, rows, cols),
     }
 }
 
 /// Matrix multiply for raw f32 weights.
-fn matrixMul_f32(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: usize) void {
+fn matrixMulVec_f32(T: type, out: []T, m: []const f32, x: []const f32, rows: usize, cols: usize) void {
     const Vec = comptime Vect(f32);
     const vector_len = comptime vectLen(Vec);
 
@@ -621,12 +621,12 @@ fn matrixMul_f32(out: []f32, m: []const f32, x: []const f32, rows: usize, cols: 
             sum += xs * ms;
         }
 
-        out[row] = sum;
+        out[row] = @floatCast(sum);
     }
 }
 
 /// Matrix multiply for Q8_0 quantized weights.
-fn matrixMul_q8_0(out: []f32, m: []const Q80Block, x: []const Q80Block, rows: usize, cols: usize) void {
+fn matrixMulVec_q8_0(T: type, out: []T, m: []const Q80Block, x: []const Q80Block, rows: usize, cols: usize) void {
     const Vec = @Vector(32, i32);
 
     const block_size = comptime blockUnitLen(Q80Block);
@@ -678,7 +678,7 @@ fn matrixMul_q8_0(out: []f32, m: []const Q80Block, x: []const Q80Block, rows: us
 
             sum += final_sum;
         }
-        out[row] = sum;
+        out[row] = @floatCast(sum);
     }
 }
 
@@ -687,12 +687,12 @@ test "matrixMul f32" {
     var b = [_]f32{ 1, 2, 5 };
     var out2 = [_]f32{0} ** 2;
 
-    matrixMul(&out2, .{ .f32 = &a }, .{ .f32 = &b }, 2, 3);
+    matrixMulVec(f32, &out2, .{ .f32 = &a }, .{ .f32 = &b }, 2, 3);
     try std.testing.expectEqualDeep([_]f32{ 20, 44 }, out2);
 
     var d = [_]f32{ 4, -1 };
     var out3 = [_]f32{0} ** 3;
-    matrixMul(&out3, .{ .f32 = &a }, .{ .f32 = &d }, 3, 2);
+    matrixMulVec(f32, &out3, .{ .f32 = &a }, .{ .f32 = &d }, 3, 2);
     try std.testing.expectEqualDeep([_]f32{ 2, 8, 14 }, out3);
 
     var m = [_]f32{
@@ -716,14 +716,14 @@ test "matrixMul f32" {
     const expect5 = [_]f32{
         2855, 4581, 4242, 5244, 5014,
     };
-    matrixMul(&out5, .{ .f32 = &m }, .{ .f32 = &x }, 5, 12);
+    matrixMulVec(f32, &out5, .{ .f32 = &m }, .{ .f32 = &x }, 5, 12);
     try std.testing.expectEqualDeep(expect5, out5);
 
     var out12 = [_]f32{0} ** 12;
     const expect12 = [_]f32{
         2953, 888, 2203, 3501, 4717, 2083, 3491, 3781, 2697, 2964, 2714, 2259,
     };
-    matrixMul(&out12, .{ .f32 = &m }, .{ .f32 = &z }, 12, 5);
+    matrixMulVec(f32, &out12, .{ .f32 = &m }, .{ .f32 = &z }, 12, 5);
     try std.testing.expectEqualDeep(expect12, out12);
 }
 

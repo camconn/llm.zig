@@ -744,7 +744,13 @@ pub const TikTokenizer = struct {
         for (0..normal_vocab) |i| {
             const rank: Rank = @intCast(i);
             const tok = token_chars.array[i].string.str;
-            try tokens.put(tok, rank);
+
+            // It's necessary to pre-process tokens because the may still have things like the
+            // space placeholder "Ġ" present.
+            var cleaned = try alloc.alloc(u8, tok.len);
+            errdefer alloc.free(cleaned);
+            cleaned = decode_data_gym(tok, cleaned);
+            try tokens.put(cleaned, rank);
         }
 
         var special = Specials.init(alloc);
@@ -1111,7 +1117,7 @@ pub const TikTokenizer = struct {
 
     /// Decode a list of `tokens` into the string representation. Caller is responsible for freeing
     /// the returned memory.
-    pub fn decode(self: Self, tokens: []Token, allocator: std.mem.Allocator) ![]u8 {
+    pub fn decode(self: Self, tokens: []const Token, allocator: std.mem.Allocator) ![]u8 {
         var ret = std.ArrayList(u8).init(allocator);
         try ret.ensureTotalCapacity(tokens.len * 4);
         defer ret.deinit();

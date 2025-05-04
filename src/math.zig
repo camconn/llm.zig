@@ -307,50 +307,99 @@ test "softMax" {
     }
 }
 
+/// Perform approximate GELU activation [1] on slice `x` with type `T`.
+/// [1]: https://arxiv.org/abs/1606.08415
+pub fn geluApprox(T: type, x: []T) void {
+    floatOnly(T);
+    // Calculate 0.5x(1 + tanh([sqrt(2/pi) * (x + 0.044715 x^3)])) for each element in X.
+    const factor = 0.044715;
+    const root_2_pi = comptime std.math.sqrt(2.0 / std.math.pi);
+
+    for (0.., x) |i, x_orig| {
+        const x_cubed = std.math.pow(T, x_orig, 3);
+
+        const inner_tanh = root_2_pi * (x_orig + factor * x_cubed);
+        const tanh = std.math.tanh(inner_tanh);
+        const out = x_orig * (1 + tanh) / 2.0;
+        x[i] = out;
+    }
+}
+
 /// Perform layer normalization [1] on `x` with weights `w` and bias `b`, with scratchpad `scratch`.
 /// Requires all input slices have the same length.
 /// Obliterates any data currently stored on `scratch`.
 /// [1]: https://arxiv.org/abs/1607.06450
-pub fn layerNorm(T: type, x: []T, w: []T, b: []T, scratch: []T) void {
+pub fn layerNorm(T: type, x: []T, w: []const T, b: []const T, scratch: []T) void {
     floatOnly(T);
     std.debug.assert(x.len == w.len);
     std.debug.assert(w.len == b.len);
     std.debug.assert(b.len == scratch.len);
 
     const Vec = comptime Vect(T);
-    const vector_len = vectLen(Vec);
+    const vector_len = comptime vectLen(Vec);
 
     const len = x.len;
     const chunks = len / vector_len;
-    const leftover_idx = len - chunks * vector_len;
+    const leftover_idx = chunks * vector_len;
 
     const avg = mean(T, x);
     const varnce = variance(T, x, scratch);
 
-    const eps_c = 0.00001;
-    // eps is the epsilon soft add term
-    const eps: Vec = @splat(eps_c);
     // mu is the average
     const mu: Vec = @splat(@as(T, @floatCast(avg)));
-    // `vs` is the population variance
-    const vs: Vec = @splat(@as(T, @floatCast(varnce)));
+    const eps = 0.00001;
+    const denom = std.math.sqrt(varnce + eps);
+    const denominator: Vec = @splat(@as(T, @floatCast(denom)));
     for (0..chunks) |i| {
         const idx = i * vector_len;
-        const xs: Vec = x[idx .. idx + vector_len].*;
-        const gamma: Vec = w[idx .. idx + vector_len].*;
-        const beta: Vec = b[idx .. idx + vector_len].*;
+        const xs: Vec = x[idx .. idx + vector_len][0..vector_len].*;
+        const gamma: Vec = w[idx .. idx + vector_len][0..vector_len].*;
+        const beta: Vec = b[idx .. idx + vector_len][0..vector_len].*;
 
         const numerator = (xs - mu) * gamma;
-        const denominator = @sqrt(vs + eps);
-
         const out = numerator / denominator + beta;
-        x[idx .. idx + vector_len].* = out;
+        std.mem.doNotOptimizeAway(out);
+
+        x[idx .. idx + vector_len][0..vector_len].* = out;
     }
 
-    for (leftover_idx..len) |i| {
+    for (leftover_idx..x.len) |i| {
         const numerator = (x[i] - @as(T, @floatCast(avg))) * w[i];
-        const denominator = @sqrt(scratch[i] + eps_c);
-        x[i] = numerator / denominator + b[i];
+        x[i] = numerator / denom + b[i];
+    }
+}
+
+test "layerNorm spot check" {
+    var layer = [_]f32{
+        2.0198,  -0.5469, -0.4136, -0.6555, -0.3068, 1.9992, -0.1188, -0.4410,
+        0.0985,  0.2089,  -3.4739, 0.6712,  0.3281,  0.0761, 0.4307,  -0.6597,
+        -0.6867, 0.5409,  0.3695,  0.0837,  -0.6385, 1.8382, 1.6295,  0.3715,
+        0.4312,  0.4318,  0.7225,
+    };
+    var tmp = [_]f32{0} ** layer.len;
+
+    const weights = [_]f32{
+        -1.0709, 0.5777,  -2.0966, -0.7667, -0.3898, 0.7914,  0.2813,  0.2937,
+        -1.9542, -0.4639, -1.6314, 0.6094,  0.5912,  -0.2582, -0.1030, 1.2118,
+        -0.6067, -1.9866, 1.2060,  2.6261,  1.9976,  -0.1223, 0.8021,  -1.1589,
+        1.7606,  1.0414,  1.9002,
+    };
+    const bias = [_]f32{
+        -2.0098, -0.6924, 1.0087, 0.0361, 1.0716,  -1.4818, 1.3093,  0.1560,
+        -0.7848, 1.0438,  1.1721, 0.3620, -0.4533, -0.7018, 1.6045,  -1.7152,
+        -0.0646, 0.1947,  0.5007, 0.2433, -0.1326, -0.5058, -0.0215, -0.6167,
+        0.1258,  0.6529,  2.2678,
+    };
+    const exp = [_]f32{
+        -3.8909, -1.0778, 2.1436, 0.6262, 1.2433,  -0.1070, 1.2353, -0.0106,
+        -0.6720, 1.0222,  6.7697, 0.6563, -0.3593, -0.6814, 1.5781, -2.6528,
+        0.4203,  -0.5206, 0.7397, 0.0551, -1.6382, -0.6996, 1.0918, -0.8485,
+        0.5774,  0.9206,  3.2778,
+    };
+    layerNorm(f32, layer[0..], &weights, &bias, &tmp);
+    for (0..layer.len) |i| {
+        const val = layer[i];
+        try std.testing.expectApproxEqAbs(exp[i], val, 0.0001);
     }
 }
 

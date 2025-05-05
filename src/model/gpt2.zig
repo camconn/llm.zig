@@ -111,9 +111,9 @@ pub const Gpt2Context = struct {
         return self.tokenizer.rank_to_token.get(token);
     }
 
-    pub fn tokenize(ptr: *anyopaque, str: []const u8, add_start: bool, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
+    pub fn tokenize(ptr: *anyopaque, str: []const u8, option: tkn.EncodingOption, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const result = try self.tokenizer.encode(str, add_start, allocator);
+        const result = try self.tokenizer.encode(str, option, allocator);
         return Tokenizer.toGenericTokens(result);
     }
 
@@ -690,7 +690,7 @@ pub fn main() !void {
     defer generated.deinit();
     try generated.append(context.config.bos_id.?);
     {
-        const tks = try context.tokenizer.encode(prompt_str, false, alloc);
+        const tks = try context.tokenizer.encode(prompt_str, .none, alloc);
         defer alloc.free(tks);
         try generated.appendSlice(tks);
     }

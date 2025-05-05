@@ -63,7 +63,7 @@ pub fn main() !void {
     }
     const prompt: []const u8 = res.args.prompt orelse "Wikipedia the free online encyclopedia that";
 
-    const tokens = try model.tokenize(prompt, true, alloc);
+    const tokens = try model.tokenize(prompt, .start, alloc);
     defer alloc.free(tokens);
 
     if (debug_mode) try stdout.print("Got {d} encoded tokens\n", .{tokens.len});
@@ -129,9 +129,7 @@ fn run_inference(
         } else if (in_prompt) {
             // TODO: Go back to also checking if the BOS token is getting used.
             //if (n != 0 and tok != BOS) {
-            if (n != 0) {
-                try stdout.print("{s}", .{input});
-            }
+            try stdout.print("{s}", .{input});
 
             // If the next token is a prediction, go ahead and print out the prediction.
             if (n + 1 == prompt.len) {

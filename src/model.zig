@@ -144,8 +144,8 @@ pub const Model = struct {
     /// Convert a string into a slice of tokens owned by `allocator`.
     /// Use `add_start` to add a start-of-text token.
     /// Caller is responsible for freeing any allocated tokens.
-    pub fn tokenize(self: *Self, str: []const u8, add_start: bool, allocator: std.mem.Allocator) RunError![]const tkn.Token {
-        return self.vtable.tokenize(self.ptr.?, str, add_start, allocator);
+    pub fn tokenize(self: *Self, str: []const u8, option: tkn.EncodingOption, allocator: std.mem.Allocator) RunError![]const tkn.Token {
+        return self.vtable.tokenize(self.ptr.?, str, option, allocator);
     }
 
     /// Convert a slice of tokens into a string owned by `allocator`.
@@ -192,7 +192,7 @@ pub const VTable = struct {
 
     /// Convert a string into a slice of tokens owned by `allocator`.
     /// Caller is responsible for freeing any allocated tokens.
-    tokenize: *const fn (*anyopaque, str: []const u8, add_start: bool, allocator: std.mem.Allocator) RunError![]const tkn.Token,
+    tokenize: *const fn (*anyopaque, str: []const u8, option: tkn.EncodingOption, allocator: std.mem.Allocator) RunError![]const tkn.Token,
 
     /// Convert a slice of tokens into a string owned by `allocator`.
     /// Caller is responsible for freeing any returned string.
@@ -217,52 +217,10 @@ pub const VTable = struct {
     deinit: *const fn (*anyopaque) void,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
-    std.debug.print("Loading model\n", .{});
-
-    const fpath = "llama2-7b-f32.gguf";
-    //const fpath = "gpt2-f32.gguf";
-    var model = try Model.init(fpath, alloc);
-    defer model.deinit();
-    std.debug.print("Done loading model. Architecture: {any}\n", .{model.arch});
-
-    const input = "Wikipedia the free online encyclopedia that";
-    std.debug.print("tokenizing input string {s}\n", .{input});
-    const tokens = try model.tokenize(input, true, alloc);
-    defer alloc.free(tokens);
-
-    std.debug.print("Tokenized to (len {d}), {d}\n", .{ tokens.len, tokens });
-
-    var sampler = llm.sample.Sampler.init(0.95, 0.90, model.vocabSize());
-
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var token = tokens[0];
-    for (0..100) |i| {
-        _ = arena.reset(.free_all);
-
-        if (i < tokens.len) {
-            token = tokens[i];
-        }
-
-        const probs = model.forward(token, i);
-        const old_str = model.toString(token).?;
-        if (i + 1 >= tokens.len) {
-            const out = try sampler.sample(probs, a);
-            const as_str = model.toString(out).?;
-            token = out;
-            std.debug.print("predict: {s} -> {s}\n", .{ old_str, as_str });
-        } else {
-            const next = tokens[i + 1];
-            const next_str = model.toString(next).?;
-
-            std.debug.print("prompt:  {s} -> {s}\n", .{ old_str, next_str });
-        }
-    }
-}
+/// Metadata about a Model
+pub const Info = struct {
+    vocab_size: usize,
+    context_len: usize,
+    start_token: ?tkn.Token,
+    end_token: ?tkn.Token,
+};

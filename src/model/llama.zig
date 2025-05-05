@@ -1164,9 +1164,9 @@ pub const LlamaContext = struct {
         return self.tokenizer.getTokenChars(token);
     }
 
-    pub fn tokenize(ptr: *anyopaque, str: []const u8, add_start: bool, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
+    pub fn tokenize(ptr: *anyopaque, str: []const u8, option: tkn.EncodingOption, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const result = try self.tokenizer.encode(str, add_start, allocator);
+        const result = try self.tokenizer.encode(str, option, allocator);
         return Tokenizer.toGenericTokens(result);
     }
 

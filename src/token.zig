@@ -30,7 +30,7 @@ pub const SPTokenizer = struct {
     /// A SentencePiece Token Entry.
     pub const TokenEntry = struct {
         score: f32,
-        id: Token,
+        id: Self.Token,
         chars: []u8,
     };
     const Storage = std.MultiArrayList(TokenEntry);
@@ -255,14 +255,14 @@ pub const SPTokenizer = struct {
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
     /// The caller is responsible for freeing the returned tokens from `token_alloc`.
-    pub fn encode(self: Self, text: []const u8, alloc: Allocator) ![]Token {
+    pub fn encode(self: Self, text: []const u8, alloc: Allocator) ![]Self.Token {
         // TODO: Handle un-encodable symbols with `<UNK>` or `UNK` token.
 
         // Optimistically assume we will output the entire text character
         // as a token.
 
         // Make a heuristic guess about how long our tokenized sequence will be
-        var output_final = std.ArrayList(Token).init(alloc);
+        var output_final = std.ArrayList(Self.Token).init(alloc);
         try output_final.ensureTotalCapacity(text.len >> 2);
         try output_final.append(BOS);
 
@@ -282,7 +282,7 @@ pub const SPTokenizer = struct {
 
         // Use a SinglyLinkedList because we are going to be repeatedly removing nodes later
         // and linked lists have the best behavior for that.
-        const Out = std.SinglyLinkedList(Token);
+        const Out = std.SinglyLinkedList(Self.Token);
         const Node = Out.Node;
         var space_node = Node{ .data = space_id };
         const tokens = Out{ .first = &space_node };
@@ -325,7 +325,7 @@ pub const SPTokenizer = struct {
             } else {
                 // Fall back and just use the single char as the token value.
                 // TODO: Figure out how to handle Unicode here.
-                const token_id: Token = @intCast(text[idx] + 3);
+                const token_id: Self.Token = @intCast(text[idx] + 3);
 
                 var next = try token_alloc.create(Node);
                 next.data = token_id;
@@ -345,7 +345,7 @@ pub const SPTokenizer = struct {
         var buf: [64]u8 = undefined;
         while (true) {
             var best: f32 = -1e10;
-            var best_id: ?Token = null;
+            var best_id: ?Self.Token = null;
             var best_idx: ?*Node = null;
 
             var node = tokens.first;
@@ -413,13 +413,13 @@ pub const SPTokenizer = struct {
     }
 
     /// Find a token by its index in `tokens`.
-    fn findIndexByTokenId(self: Self, token: Token) ?usize {
+    fn findIndexByTokenId(self: Self, token: Self.Token) ?usize {
         // TODO: find a better path to make this private
         return self.token_to_idx[@intCast(token)];
     }
 
     /// Get the token entry for the given token.
-    pub fn getTokenChars(self: Self, tok: Token) ?[]const u8 {
+    pub fn getTokenChars(self: Self, tok: Self.Token) ?[]const u8 {
         if (self.findIndexByTokenId(tok)) |idx| {
             return self.tokens.items(.chars)[idx];
         }
@@ -664,9 +664,9 @@ pub const TikTokenizer = struct {
     /// Tokens are not necessarily compatible between models.
     pub const Token = u64;
 
-    const Rank = Token;
+    const Rank = Self.Token;
     const Ranks = std.StringHashMap(Rank);
-    const Specials = std.StringArrayHashMap(Token);
+    const Specials = std.StringArrayHashMap(Self.Token);
     const TokenList = std.ArrayList(Rank);
     const Reverse = std.AutoHashMap(Rank, []const u8);
 
@@ -965,7 +965,7 @@ pub const TikTokenizer = struct {
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
     /// The caller is responsible for freeing the slice of returned tokens with `token_alloc`.
-    pub fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Token {
+    pub fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Self.Token {
         var tokens = TokenList.init(token_alloc);
         defer tokens.deinit();
         // Best guesstimate
@@ -979,7 +979,7 @@ pub const TikTokenizer = struct {
         var working = text[0..];
         const specials = self.special_tokens.keys()[0..self.special_tokens.count()];
         while (working.len != 0) {
-            var special_id: ?Token = null;
+            var special_id: ?Self.Token = null;
             var next_idx = working.len;
             var window = working[0..];
 
@@ -1117,7 +1117,7 @@ pub const TikTokenizer = struct {
 
     /// Decode a list of `tokens` into the string representation. Caller is responsible for freeing
     /// the returned memory.
-    pub fn decode(self: Self, tokens: []const Token, allocator: std.mem.Allocator) ![]u8 {
+    pub fn decode(self: Self, tokens: []const Self.Token, allocator: std.mem.Allocator) ![]u8 {
         var ret = std.ArrayList(u8).init(allocator);
         try ret.ensureTotalCapacity(tokens.len * 4);
         defer ret.deinit();

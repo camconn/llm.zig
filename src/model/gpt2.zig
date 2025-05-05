@@ -41,7 +41,8 @@ pub const Gpt2Context = struct {
         .to_string = toString,
         .forward = forward,
         .vocab_size = vocabSize,
-        .deinit = deinit,
+        .context_len = contextLen,
+        .deinit = deinitVirt,
     };
 
     // Only used for `initGeneric`
@@ -110,9 +111,9 @@ pub const Gpt2Context = struct {
         return self.tokenizer.rank_to_token.get(token);
     }
 
-    pub fn tokenize(ptr: *anyopaque, str: []const u8, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
+    pub fn tokenize(ptr: *anyopaque, str: []const u8, add_start: bool, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const result = try self.tokenizer.encode(str, allocator);
+        const result = try self.tokenizer.encode(str, add_start, allocator);
         return Tokenizer.toGenericTokens(result);
     }
 
@@ -127,8 +128,12 @@ pub const Gpt2Context = struct {
         return self.config.n_vocab;
     }
 
-    pub fn deinit(ptr: *anyopaque) void {
+    pub fn contextLen(ptr: *anyopaque) usize {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.config.n_ctx;
+    }
+
+    pub fn deinit(self: *Self) void {
         self.transformer.deinit();
         self.state.deinit();
         self.tokenizer.deinit();
@@ -139,6 +144,11 @@ pub const Gpt2Context = struct {
         if (self.a) |alloc| {
             alloc.destroy(self);
         }
+    }
+
+    pub fn deinitVirt(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.deinit();
     }
 };
 
@@ -680,7 +690,7 @@ pub fn main() !void {
     defer generated.deinit();
     try generated.append(context.config.bos_id.?);
     {
-        const tks = try context.tokenizer.encode(prompt_str, alloc);
+        const tks = try context.tokenizer.encode(prompt_str, false, alloc);
         defer alloc.free(tks);
         try generated.appendSlice(tks);
     }

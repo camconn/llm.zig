@@ -267,11 +267,11 @@ pub const SPTokenizer = struct {
     const PAD_PIECE = "<pad>";
     const SPACE_PIECE = " ";
 
-    /// Encode text into a series of tokens.
+    /// Encode `text` into a series of tokens with option to add a start `BOS` to returned slice.
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
     /// The caller is responsible for freeing the returned tokens from `token_alloc`.
-    pub fn encode(self: Self, text: []const u8, alloc: Allocator) ![]Self.Token {
+    pub fn encode(self: Self, text: []const u8, add_start: bool, alloc: Allocator) ![]Self.Token {
         // TODO: Handle un-encodable symbols with `<UNK>` or `UNK` token.
 
         // Optimistically assume we will output the entire text character
@@ -280,7 +280,9 @@ pub const SPTokenizer = struct {
         // Make a heuristic guess about how long our tokenized sequence will be
         var output_final = std.ArrayList(Self.Token).init(alloc);
         try output_final.ensureTotalCapacity(text.len >> 2);
-        try output_final.append(BOS);
+        if (add_start) {
+            try output_final.append(BOS);
+        }
 
         const slice = self.tokens.slice();
         const chars = slice.items(.chars);
@@ -465,7 +467,7 @@ test "SPTokenizer.encode" {
         const sample = "Hello, world! How are you today?";
         const ids = [_]SPTokenizer.Token{ 1, 15043, 29892, 3186, 29991, 1128, 526, 366, 9826, 29973 };
 
-        const tokens = try tokenizer.encode(sample, std.testing.allocator);
+        const tokens = try tokenizer.encode(sample, true, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
         try std.testing.expectEqualSlices(SPTokenizer.Token, &ids, tokens);
@@ -475,7 +477,7 @@ test "SPTokenizer.encode" {
         const sample = "Hello\nworld";
         const ids = [_]SPTokenizer.Token{ 1, 15043, 13, 11526 };
 
-        const tokens = try tokenizer.encode(sample, std.testing.allocator);
+        const tokens = try tokenizer.encode(sample, true, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
         try std.testing.expectEqualSlices(SPTokenizer.Token, &ids, tokens);
@@ -492,7 +494,7 @@ test "SPTokenizer.encode" {
         };
         // zig fmt: on
 
-        const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
+        const tokens = try tokenizer.encode(sample[0..], true, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
         try std.testing.expectEqualSlices(SPTokenizer.Token, &ids, tokens);
@@ -506,7 +508,7 @@ test "SPTokenizer.encode" {
         defer ids_json.deinit();
         const ids = ids_json.value;
 
-        const tokens = try tokenizer.encode(sample[0..], std.testing.allocator);
+        const tokens = try tokenizer.encode(sample[0..], true, std.testing.allocator);
         defer std.testing.allocator.free(tokens);
 
         try std.testing.expectEqualSlices(SPTokenizer.Token, ids, tokens);
@@ -703,6 +705,11 @@ pub const TikTokenizer = struct {
     rank_to_token: Reverse,
     special_tokens: Specials,
 
+    /// Optional BOS token setting
+    bos: ?Self.Token,
+    /// Optional EOS token setting
+    eos: ?Self.Token,
+
     arena: ArenaAllocator,
 
     /// Read and initialize a `TikTokenizer` instance from the provided `file` using the given
@@ -742,6 +749,7 @@ pub const TikTokenizer = struct {
         //const padding = file.getValue("tokenizer.ggml.padding_token_id").?.uint32;
         var add_bos: bool = false;
         if (file.getValueT("tokenizer.ggml.add_bos_token", .boolean)) |val| {
+            // TODO: Figure out where this goes.
             add_bos = val.boolean;
         }
         // TODO: We assume that EOS and BOS tokens are always at the end of the vocabulary.
@@ -812,6 +820,8 @@ pub const TikTokenizer = struct {
         // a leak from the Arena's allocations.
         // Same with Token Storage
         return .{
+            .bos = bos,
+            .eos = eos,
             .tokens = tokens,
             .special_tokens = special,
             .rank_to_token = reverse,
@@ -928,6 +938,10 @@ pub const TikTokenizer = struct {
             .arena = arena,
             .rank_to_token = reversed,
             .special_tokens = specials,
+            // TODO: Figure out if we ever need to pass in BOS or EOS IDs.
+            //       this method is only used for testing, so maybe we don't need it.
+            .bos = null,
+            .eos = null,
         };
     }
 
@@ -990,15 +1004,21 @@ pub const TikTokenizer = struct {
         self.arena.deinit();
     }
 
-    /// Encode text into a series of tokens.
+    /// Encode `text` into a series of tokens.
     /// Any slice returned will be allocated with `token_alloc`. The allocator used for
     /// calling `init()` will not be used.
     /// The caller is responsible for freeing the slice of returned tokens with `token_alloc`.
-    pub fn encode(self: Self, text: []const u8, token_alloc: Allocator) ![]Self.Token {
+    pub fn encode(self: Self, text: []const u8, add_start: bool, token_alloc: Allocator) ![]Self.Token {
         var tokens = TokenList.init(token_alloc);
         defer tokens.deinit();
         // Best guesstimate
         try tokens.ensureTotalCapacity(text.len / 2);
+
+        if (add_start) {
+            if (self.bos) |bos| {
+                try tokens.append(bos);
+            }
+        }
 
         // Encode the source `text` by sliding a working window through the text and tokenizing
         // in parts.
@@ -1220,7 +1240,7 @@ test "GPT-2 Tokenizer" {
     for (cases) |case| {
         const input = case[0];
         const expected = case[1];
-        const actual = try tokenizer.encode(input, alloc);
+        const actual = try tokenizer.encode(input, false, alloc);
         defer alloc.free(actual);
         try std.testing.expectEqualSlices(TikTokenizer.Token, expected, actual);
 

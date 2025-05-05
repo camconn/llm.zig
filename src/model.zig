@@ -142,9 +142,10 @@ pub const Model = struct {
     }
 
     /// Convert a string into a slice of tokens owned by `allocator`.
+    /// Use `add_start` to add a start-of-text token.
     /// Caller is responsible for freeing any allocated tokens.
-    pub fn tokenize(self: *Self, str: []const u8, allocator: std.mem.Allocator) RunError![]const tkn.Token {
-        return self.vtable.tokenize(self.ptr.?, str, allocator);
+    pub fn tokenize(self: *Self, str: []const u8, add_start: bool, allocator: std.mem.Allocator) RunError![]const tkn.Token {
+        return self.vtable.tokenize(self.ptr.?, str, add_start, allocator);
     }
 
     /// Convert a slice of tokens into a string owned by `allocator`.
@@ -162,6 +163,11 @@ pub const Model = struct {
     /// Return the size of this model's vocabulary.
     pub fn vocabSize(self: *Self) usize {
         return self.vtable.vocab_size(self.ptr.?);
+    }
+
+    /// Return the size of the model's context length.
+    pub fn contextLength(self: *Self) usize {
+        return self.vtable.context_len(self.ptr.?);
     }
 
     /// Free up any resources currently loaded or allocated for this Model.
@@ -186,7 +192,7 @@ pub const VTable = struct {
 
     /// Convert a string into a slice of tokens owned by `allocator`.
     /// Caller is responsible for freeing any allocated tokens.
-    tokenize: *const fn (*anyopaque, str: []const u8, allocator: std.mem.Allocator) RunError![]const tkn.Token,
+    tokenize: *const fn (*anyopaque, str: []const u8, add_start: bool, allocator: std.mem.Allocator) RunError![]const tkn.Token,
 
     /// Convert a slice of tokens into a string owned by `allocator`.
     /// Caller is responsible for freeing any returned string.
@@ -202,6 +208,9 @@ pub const VTable = struct {
 
     /// Return the vocabulary size of the model's currently loaded tokenizer.
     vocab_size: *const fn (*anyopaque) usize,
+
+    /// Return the size of the context window.
+    context_len: *const fn (*anyopaque) usize,
 
     /// De-initialize the model context and any associated resources.
     /// Model implementations are responsible for calling `allocator.destroy(self)` during this function.
@@ -223,7 +232,7 @@ pub fn main() !void {
 
     const input = "Wikipedia the free online encyclopedia that";
     std.debug.print("tokenizing input string {s}\n", .{input});
-    const tokens = try model.tokenize(input, alloc);
+    const tokens = try model.tokenize(input, true, alloc);
     defer alloc.free(tokens);
 
     std.debug.print("Tokenized to (len {d}), {d}\n", .{ tokens.len, tokens });

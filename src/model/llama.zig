@@ -301,8 +301,8 @@ fn precompute_frequencies(
 
 test "check precompute_frequencies static" {
     // Precomputed coefficients as exported into "v0" llama2.c model file for llama2 7b.
-    const cos_file = @embedFile("assets/cos.json");
-    const sin_file = @embedFile("assets/sin.json");
+    const cos_file = @embedFile("../assets/cos.json");
+    const sin_file = @embedFile("../assets/sin.json");
 
     const cos = try std.json.parseFromSlice([]f32, std.testing.allocator, cos_file, .{});
     defer cos.deinit();
@@ -979,7 +979,8 @@ pub const LlamaContext = struct {
         .to_string = toString,
         .forward = forward,
         .vocab_size = vocabSize,
-        .deinit = deinit,
+        .context_len = contextLen,
+        .deinit = deinitVirt,
     };
 
     // Only used for `initGeneric`
@@ -1163,9 +1164,9 @@ pub const LlamaContext = struct {
         return self.tokenizer.getTokenChars(token);
     }
 
-    pub fn tokenize(ptr: *anyopaque, str: []const u8, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
+    pub fn tokenize(ptr: *anyopaque, str: []const u8, add_start: bool, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        const result = try self.tokenizer.encode(str, allocator);
+        const result = try self.tokenizer.encode(str, add_start, allocator);
         return Tokenizer.toGenericTokens(result);
     }
 
@@ -1187,8 +1188,12 @@ pub const LlamaContext = struct {
         return self.config.vocab_size;
     }
 
-    pub fn deinit(ptr: *anyopaque) void {
+    pub fn contextLen(ptr: *anyopaque) usize {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.config.max_seq_length;
+    }
+
+    pub fn deinit(self: *Self) void {
         self.transformer.deinit();
         self.state.deinit();
         self.tokenizer.deinit();
@@ -1199,6 +1204,11 @@ pub const LlamaContext = struct {
         if (self.a) |alloc| {
             alloc.destroy(self);
         }
+    }
+
+    pub fn deinitVirt(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.deinit();
     }
 };
 

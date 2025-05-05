@@ -63,7 +63,7 @@ pub fn main() !void {
     }
     const prompt: []const u8 = res.args.prompt orelse "Wikipedia the free online encyclopedia that";
 
-    const tokens = try model.tokenize(prompt, alloc);
+    const tokens = try model.tokenize(prompt, true, alloc);
     defer alloc.free(tokens);
 
     if (debug_mode) try stdout.print("Got {d} encoded tokens\n", .{tokens.len});
@@ -101,9 +101,7 @@ fn run_inference(
 
     const start_time = try std.time.Instant.now();
     // TODO: Implement shifting whenever running for longer than `max_seq_length`
-    // TODO: Go back to variable sequence length
-    //while (n < config.max_seq_length) : (n += 1) {
-    while (n < 120) : (n += 1) {
+    while (n < model.contextLength()) : (n += 1) {
         if (progress) |prog| prog.setCompletedItems(n);
         const in_prompt = n < prompt.len;
         if (in_prompt) {
@@ -129,12 +127,11 @@ fn run_inference(
         if (debug_mode) {
             try stdout.print("In: {d} <<{s}>>; Out: {d} <<{s}>>\n", .{ tok, input, next_token, predicted });
         } else if (in_prompt) {
-            // TODO: Don't print BOS at start of output.
-            //if (n != 0 and tok != SPTokenizer.BOS) {
-            //    try stdout.print("{s}", .{input});
-            //}
-
-            try stdout.print("{s}", .{input});
+            // TODO: Go back to also checking if the BOS token is getting used.
+            //if (n != 0 and tok != BOS) {
+            if (n != 0) {
+                try stdout.print("{s}", .{input});
+            }
 
             // If the next token is a prediction, go ahead and print out the prediction.
             if (n + 1 == prompt.len) {

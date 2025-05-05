@@ -9,6 +9,7 @@
 //! below.
 
 pub const ggml = @import("ggml.zig");
+pub const gpt2 = @import("gpt2.zig");
 pub const llama = @import("llama.zig");
 pub const math = @import("math.zig");
 pub const regex = @import("regex.zig");

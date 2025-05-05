@@ -40,8 +40,7 @@ pub const Gpt2Context = struct {
         .detokenize = detokenize,
         .to_string = toString,
         .forward = forward,
-        .vocab_size = vocabSize,
-        .context_len = contextLen,
+        .get_info = getInfo,
         .deinit = deinitVirt,
     };
 
@@ -123,14 +122,16 @@ pub const Gpt2Context = struct {
         return try self.tokenizer.decode(as_tiktokens, allocator);
     }
 
-    pub fn vocabSize(ptr: *anyopaque) usize {
+    pub fn getInfo(ptr: *anyopaque) model.Info {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        return self.config.n_vocab;
-    }
-
-    pub fn contextLen(ptr: *anyopaque) usize {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        return self.config.n_ctx;
+        return .{
+            .vocab_size = self.config.n_vocab,
+            .context_len = self.config.n_ctx,
+            .add_start = self.tokenizer.add_bos,
+            .start_token = self.tokenizer.bos,
+            .add_end = false,
+            .end_token = self.tokenizer.eos,
+        };
     }
 
     pub fn deinit(self: *Self) void {

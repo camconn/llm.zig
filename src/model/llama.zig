@@ -978,8 +978,7 @@ pub const LlamaContext = struct {
         .detokenize = detokenize,
         .to_string = toString,
         .forward = forward,
-        .vocab_size = vocabSize,
-        .context_len = contextLen,
+        .get_info = getInfo,
         .deinit = deinitVirt,
     };
 
@@ -1183,9 +1182,16 @@ pub const LlamaContext = struct {
         return ret.toOwnedSlice();
     }
 
-    pub fn vocabSize(ptr: *anyopaque) usize {
+    pub fn getInfo(ptr: *anyopaque) model.Info {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        return self.config.vocab_size;
+        return .{
+            .vocab_size = self.config.vocab_size,
+            .context_len = self.config.max_seq_length,
+            .add_start = true,
+            .start_token = Tokenizer.BOS,
+            .add_end = false,
+            .end_token = Tokenizer.EOS,
+        };
     }
 
     pub fn contextLen(ptr: *anyopaque) usize {

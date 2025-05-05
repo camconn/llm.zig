@@ -160,14 +160,9 @@ pub const Model = struct {
         return self.vtable.to_string(self.ptr.?, token);
     }
 
-    /// Return the size of this model's vocabulary.
-    pub fn vocabSize(self: *Self) usize {
-        return self.vtable.vocab_size(self.ptr.?);
-    }
-
-    /// Return the size of the model's context length.
-    pub fn contextLength(self: *Self) usize {
-        return self.vtable.context_len(self.ptr.?);
+    /// Get metadata information about the loaded model.
+    pub fn getInfo(self: *Self) Info {
+        return self.vtable.get_info(self.ptr.?);
     }
 
     /// Free up any resources currently loaded or allocated for this Model.
@@ -206,21 +201,29 @@ pub const VTable = struct {
     /// Returns a list of token probabilities
     forward: *const fn (*anyopaque, token: tkn.Token, n_token: usize) []f32,
 
-    /// Return the vocabulary size of the model's currently loaded tokenizer.
-    vocab_size: *const fn (*anyopaque) usize,
-
-    /// Return the size of the context window.
-    context_len: *const fn (*anyopaque) usize,
+    /// Get metadata information about the loaded model useful for runtime inference.
+    get_info: *const fn (*anyopaque) Info,
 
     /// De-initialize the model context and any associated resources.
     /// Model implementations are responsible for calling `allocator.destroy(self)` during this function.
     deinit: *const fn (*anyopaque) void,
 };
 
-/// Metadata about a Model
+/// Information about a loaded model's vocabulary, input, and tokenization settings.
 pub const Info = struct {
+    /// Vocabulary size for the model
     vocab_size: usize,
+    /// Context length for the model
     context_len: usize,
+
+    /// Does this model expects a `start_token` at the beginning of input.
+    add_start: bool,
+    /// Does this model expects a `end_token` at the end of inference input.
+    add_end: bool,
+    /// The start-of-input token, if it exists.
+    /// This *must* be present if `add_start` is true.
     start_token: ?tkn.Token,
+    /// The end-of-input token, if it exists.
+    /// This *must* be exist if `add_end` is true.
     end_token: ?tkn.Token,
 };

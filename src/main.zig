@@ -94,14 +94,15 @@ fn run_inference(
         null;
     defer if (progress) |prog| prog.end();
 
-    var picker = llm.sample.Sampler.init(0.95, 0.9, model.vocabSize());
+    const model_info = model.getInfo();
+    var picker = llm.sample.Sampler.init(0.95, 0.9, model_info.vocab_size);
 
     var n: usize = 0;
     var tok: Token = undefined;
 
     const start_time = try std.time.Instant.now();
-    // TODO: Implement shifting whenever running for longer than `max_seq_length`
-    while (n < model.contextLength()) : (n += 1) {
+    // TODO: Implement shifting whenever running for longer than context window
+    while (n < model_info.context_len) : (n += 1) {
         if (progress) |prog| prog.setCompletedItems(n);
         const in_prompt = n < prompt.len;
         if (in_prompt) {
@@ -127,25 +128,33 @@ fn run_inference(
         if (debug_mode) {
             try stdout.print("In: {d} <<{s}>>; Out: {d} <<{s}>>\n", .{ tok, input, next_token, predicted });
         } else if (in_prompt) {
-            // TODO: Go back to also checking if the BOS token is getting used.
-            //if (n != 0 and tok != BOS) {
-            try stdout.print("{s}", .{input});
+            // Special handling for start of input token
+            if (model_info.start_token) |start| {
+                if (tok != start) {
+                    try stdout.print("{s}", .{input});
+                }
+            } else {
+                try stdout.print("{s}", .{input});
+            }
 
             // If the next token is a prediction, go ahead and print out the prediction.
             if (n + 1 == prompt.len) {
                 try stdout.print("{s}", .{predicted});
             }
         } else {
-            // TODO: handle breaking out at EOS
-            //if (next_token != SPTokenizer.EOS) {
-            //    try stdout.print("{s}", .{predicted});
-            //}
-            try stdout.print("{s}", .{predicted});
+            if (model_info.end_token) |stop| {
+                if (next_token != stop) {
+                    try stdout.print("{s}", .{predicted});
+                }
+            } else {
+                try stdout.print("{s}", .{predicted});
+            }
         }
         tok = next_token;
 
         // End of output
-        // TODO: Handle breaking out at EOS
-        //if (tok == SPTokenizer.EOS) break;
+        if (model_info.end_token) |stop| {
+            if (tok == stop) break;
+        }
     }
 }

@@ -11,9 +11,12 @@ non-AI code like parsing CLI arguments.
 
 ## Implemented
 - GGML
-    - Loading `FP32` and `Q8_0` quantizations are supported for all models with `.gguf` files.
-    - Loading `Q8_0` quantiation is supported for
-- LLaMA 2
+    - Loading `FP32` and `Q8_0` quantizations are supported.
+    - Loading `Q8_0` quantiation is supported for Llama 1 & 2 models.
+- GPT-2
+    - `FP32` GGUF models are supported
+    - Currently not exposed through CLI.
+- LLaMA 1/2
     - `FP32` and `Q8_0` models are supported
     - SentencePiece-like tokenization
     - Key-Value caching

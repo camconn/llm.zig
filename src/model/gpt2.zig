@@ -14,6 +14,7 @@ const std = @import("std");
 const llm = @import("../root.zig");
 const ggml = llm.ggml;
 const math = llm.math;
+const model = llm.model;
 const sample = llm.sample;
 const tkn = llm.token;
 
@@ -32,6 +33,16 @@ pub const Error = error{
 
 pub const Gpt2Context = struct {
     const Self = @This();
+
+    pub const vtable = model.VTable{
+        .init = initGeneric,
+        .tokenize = tokenize,
+        .detokenize = detokenize,
+        .to_string = toString,
+        .forward = forward,
+        .vocab_size = vocabSize,
+        .deinit = deinit,
+    };
 
     // Only used for `initGeneric`
     a: ?Allocator,
@@ -89,8 +100,35 @@ pub const Gpt2Context = struct {
         };
     }
 
-    /// De-initialize and free up any resources associated with this `Gpt2Context`.
-    pub fn deinit(self: *Self) void {
+    pub fn forward(ptr: *anyopaque, token: tkn.Token, n_token: usize) []f32 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.transformer.forward(&self.state, token, n_token);
+    }
+
+    pub fn toString(ptr: *anyopaque, token: tkn.Token) ?[]const u8 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.tokenizer.rank_to_token.get(token);
+    }
+
+    pub fn tokenize(ptr: *anyopaque, str: []const u8, allocator: std.mem.Allocator) model.RunError![]const tkn.Token {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const result = try self.tokenizer.encode(str, allocator);
+        return Tokenizer.toGenericTokens(result);
+    }
+
+    pub fn detokenize(ptr: *anyopaque, tokens: []const tkn.Token, allocator: std.mem.Allocator) model.RunError![]u8 {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const as_tiktokens = Tokenizer.fromGenericTokens(tokens);
+        return try self.tokenizer.decode(as_tiktokens, allocator);
+    }
+
+    pub fn vocabSize(ptr: *anyopaque) usize {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.config.n_vocab;
+    }
+
+    pub fn deinit(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         self.transformer.deinit();
         self.state.deinit();
         self.tokenizer.deinit();

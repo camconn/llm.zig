@@ -27,6 +27,13 @@ pub const TokenizerError = error{
     BadFormat,
 };
 
+/// An arbitrary token for any model.
+/// Intended to represent a token in any Language Model.
+/// Not necessarily comparable between models.
+pub const Token = i64;
+/// Disambiguation alias to `Token`.
+pub const TokenizerToken = Token;
+
 /// Implementation of the `sentencepiece` tokenizer.
 pub const SPTokenizer = struct {
     const Self = @This();
@@ -34,7 +41,7 @@ pub const SPTokenizer = struct {
     /// A single Token's ID. Represents one of the possible vocabulary tokens for a number of models.
     /// Note that invalid/padding tokens are < 0.
     /// Tokens are not necessarily compatible between models.
-    pub const Token = i32;
+    pub const Token = i64;
 
     /// A SentencePiece Token Entry.
     pub const TokenEntry = struct {
@@ -434,6 +441,18 @@ pub const SPTokenizer = struct {
         }
         return null;
     }
+
+    /// Cast a slice of this vocabulary's `tokens` into a generic slice of `TokenizerToken`.
+    pub fn toGenericTokens(tokens: []const Self.Token) []const TokenizerToken {
+        const as_bytes = std.mem.sliceAsBytes(tokens);
+        return std.mem.bytesAsSlice(TokenizerToken, as_bytes);
+    }
+
+    /// Cast a slice of generic `tokens` into a slice of this vocabulary's tokens.
+    pub fn fromGenericTokens(tokens: []const TokenizerToken) []const Self.Token {
+        const as_bytes = std.mem.sliceAsBytes(tokens);
+        return std.mem.bytesAsSlice(Self.Token, as_bytes);
+    }
 };
 
 test "SPTokenizer.encode" {
@@ -671,7 +690,8 @@ pub const TikTokenizer = struct {
 
     /// A single Token's ID. Represents one of the possible vocabulary tokens for a number of models.
     /// Tokens are not necessarily compatible between models.
-    pub const Token = u64;
+    pub const Token = i64;
+    //pub const Token = u64;
 
     const Rank = Self.Token;
     const Ranks = std.StringHashMap(Rank);
@@ -768,7 +788,7 @@ pub const TikTokenizer = struct {
 
         if (n_specials >= 1) {
             for (0..n_specials) |i| {
-                const rank: Rank = normal_vocab + @as(Rank, @intCast(i));
+                const rank: Rank = @as(Rank, @intCast(normal_vocab)) + @as(Rank, @intCast(i));
                 const tok = token_chars.array[i].string.str;
                 try special.put(tok, rank);
             }
@@ -856,7 +876,7 @@ pub const TikTokenizer = struct {
                 if (cleaned.len < combined.len) {
                     _ = alloc.resize(combined, cleaned.len);
                 }
-                try ranks.put(cleaned, n);
+                try ranks.put(cleaned, @intCast(n));
 
                 n += 1;
             } else {
@@ -988,7 +1008,7 @@ pub const TikTokenizer = struct {
         var working = text[0..];
         const specials = self.special_tokens.keys()[0..self.special_tokens.count()];
         while (working.len != 0) {
-            var special_id: ?Self.Token = null;
+            var special_id: ?TokenizerToken = null;
             var next_idx = working.len;
             var window = working[0..];
 
@@ -1011,7 +1031,7 @@ pub const TikTokenizer = struct {
             while (iter.next()) |group| {
                 if (self.tokens.get(group)) |token| {
                     // If we have an elementary token, append that
-                    try tokens.append(token);
+                    try tokens.append(@intCast(token));
                 } else {
                     // Otherwise, break down group into individual tokens
                     try self.encode_piece(group, &tokens, token_alloc);
@@ -1026,7 +1046,7 @@ pub const TikTokenizer = struct {
             working = working[next_idx..];
         }
 
-        return try tokens.toOwnedSlice();
+        return tokens.toOwnedSlice();
     }
 
     /// Encode a `piece` within a greater input string into BPE-form and append to `tokens` list.
@@ -1141,6 +1161,18 @@ pub const TikTokenizer = struct {
         }
 
         return try ret.toOwnedSlice();
+    }
+
+    /// Cast a slice of this vocabulary's `tokens` into a generic slice of `TokenizerToken`.
+    pub fn toGenericTokens(tokens: []const Self.Token) []const TokenizerToken {
+        const as_bytes = std.mem.sliceAsBytes(tokens);
+        return std.mem.bytesAsSlice(TokenizerToken, as_bytes);
+    }
+
+    /// Cast a slice of generic `tokens` into a slice of this vocabulary's tokens.
+    pub fn fromGenericTokens(tokens: []const TokenizerToken) []const Self.Token {
+        const as_bytes = std.mem.sliceAsBytes(tokens);
+        return std.mem.bytesAsSlice(Self.Token, as_bytes);
     }
 };
 

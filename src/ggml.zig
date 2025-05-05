@@ -20,7 +20,7 @@ const Reader = std.io.FixedBufferStream([]align(page_size) u8).Reader;
 
 /// Custom error type to help the Zig compiler infer the error union from recursive
 /// `try foo()` calls.
-const Error = error{
+pub const Error = error{
     FileError,
     Alloc,
     Format,

@@ -9,7 +9,8 @@ const std = @import("std");
 const clap = @import("clap");
 
 const llm = @import("llm");
-const llama = llm.llama;
+const model = llm.model;
+const llama = model.llama;
 
 const print_perf = false;
 
@@ -202,6 +203,7 @@ fn load_llama2(tokenizer_path: []const u8, model_path: []const u8, alloc: std.me
     errdefer state.deinit();
 
     return .{
+        .a = null,
         .config = config,
         .transformer = transformer,
         .tokenizer = tokenizer,

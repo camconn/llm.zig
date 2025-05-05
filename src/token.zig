@@ -18,6 +18,15 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 
 const tokenizer_key = "tokenizer.ggml.model";
 
+pub const TokenizerError = error{
+    /// Tried to load the wrong tokenizer type for a model.
+    WrongTokenizer,
+    /// Tried to load invalid tokenizer settings.
+    Tokenizer,
+    /// Tokenizer has invalid format or contents.
+    BadFormat,
+};
+
 /// Implementation of the `sentencepiece` tokenizer.
 pub const SPTokenizer = struct {
     const Self = @This();
@@ -683,7 +692,7 @@ pub const TikTokenizer = struct {
         // TODO: Swap regex pattern based on support tokenizer_model string.
         if (!std.mem.eql(u8, tokenizer_model.str, "gpt2")) {
             std.debug.print("Found non-GPT tokenizer model: {s}\n", .{tokenizer_model.str});
-            return error.WrongTokenizer;
+            return TokenizerError.WrongTokenizer;
         }
 
         var found_context_len: bool = false;
@@ -696,7 +705,7 @@ pub const TikTokenizer = struct {
         }
         if (!found_context_len) {
             std.debug.print("Could not find context length for Tokenizer\n", .{});
-            return error.Tokenizer;
+            return TokenizerError.Tokenizer;
         }
 
         const token_chars = file.getValue("tokenizer.ggml.tokens").?.array;
@@ -728,7 +737,7 @@ pub const TikTokenizer = struct {
                 num_merges,
                 token_merges.array.len,
             });
-            return error.BadFormat;
+            return TokenizerError.BadFormat;
         }
 
         //std.debug.print("bos {d} eos {d}\n", .{ bos, eos });

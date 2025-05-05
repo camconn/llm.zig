@@ -11,7 +11,7 @@
 
 const std = @import("std");
 
-const llm = @import("root.zig");
+const llm = @import("../root.zig");
 const ggml = llm.ggml;
 const math = llm.math;
 const sample = llm.sample;
@@ -33,11 +33,37 @@ pub const Error = error{
 pub const Gpt2Context = struct {
     const Self = @This();
 
+    // Only used for `initGeneric`
+    a: ?Allocator,
+
     config: Config,
     transformer: Transformer,
     state: State,
     tokenizer: Tokenizer,
     file: ?ggml.GGUFFile,
+
+    pub fn initGeneric(file: ggml.GGUFFile, allocator: std.mem.Allocator) llm.model.LoadError!*anyopaque {
+        const ret = try allocator.create(Gpt2Context);
+        errdefer allocator.destroy(ret);
+
+        var tokenizer = try Tokenizer.init(file, allocator);
+        errdefer tokenizer.deinit();
+        var transformer = try Transformer.init(file, allocator);
+        errdefer transformer.deinit();
+        const config = transformer.config;
+        var state = try State.init(config, allocator);
+        errdefer state.deinit();
+
+        ret.* = .{
+            .a = allocator,
+            .config = config,
+            .tokenizer = tokenizer,
+            .transformer = transformer,
+            .state = state,
+            .file = file,
+        };
+        return ret;
+    }
 
     /// Attempt to initialize and and load a GPT-2 model from `file`.
     /// The returned `Gpt2Context` takes ownership of the opened file.
@@ -54,6 +80,7 @@ pub const Gpt2Context = struct {
         errdefer state.deinit();
 
         return .{
+            .a = allocator,
             .config = config,
             .tokenizer = tokenizer,
             .transformer = transformer,
@@ -70,6 +97,9 @@ pub const Gpt2Context = struct {
         if (self.file) |*file| {
             file.deinit();
             self.file = null;
+        }
+        if (self.a) |alloc| {
+            alloc.destroy(self);
         }
     }
 };

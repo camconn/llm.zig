@@ -5,11 +5,10 @@
 // © 2025 Cameron Conn
 
 //! llama: This module contains an implementation of the LLaMA 2 LLM.
-//!
 
 const std = @import("std");
 
-const llm = @import("root.zig");
+const llm = @import("../root.zig");
 const ggml = llm.ggml;
 const math = llm.math;
 const token = llm.token;
@@ -970,11 +969,70 @@ pub const TransformerV1 = struct {
 };
 
 pub const LlamaContext = struct {
+    // Only used for `initGeneric`
+    a: ?Allocator,
+
     config: Config,
     transformer: TransformerV1,
     state: State,
     tokenizer: Tokenizer,
     file: ?ggml.GGUFFile = null,
+
+    /// Initialize and read a new Llama V1 or V2 inference context from a provided GGUF file.
+    /// Returns an `Error.BadFile` whenever the file is an unsupported model or quantization
+    /// format.
+    pub fn initGeneric(file: ggml.GGUFFile, alloc: std.mem.Allocator) llm.model.LoadError!*anyopaque {
+        try ensureCorrectModel(file);
+
+        const ret = try alloc.create(LlamaContext);
+        errdefer alloc.destroy(ret);
+
+        const config = Config.readGGUF(file);
+
+        // Load Tokenizer
+        var tokenizer = try Tokenizer.initGGUF(file, alloc);
+        errdefer tokenizer.deinit();
+
+        var state = try State.init(alloc, config);
+        errdefer state.deinit();
+
+        // Load Transformer Weights
+        const token_embed = try loadWeights(file, "token_embd.weight"); // sic
+        const output_norm = try loadWeights(file, "output_norm.weight");
+        const output_weight = try loadWeights(file, "output.weight");
+
+        var arena = ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+
+        var arena_alloc = arena.allocator();
+        var layers = try arena_alloc.alloc(TransformerBlock, config.n_layers);
+        for (0..config.n_layers) |i| {
+            layers[i] = TransformerBlock.initGGUF(file, config, i);
+        }
+
+        const transformer = TransformerV1{
+            .fd = -1,
+            .ptr = null,
+            .arena = arena,
+
+            .config = config,
+
+            .token_embed = token_embed,
+            .layers = layers,
+            .norm = output_norm,
+            .classifier = output_weight,
+        };
+
+        ret.* = .{
+            .a = alloc,
+            .config = config,
+            .transformer = transformer,
+            .state = state,
+            .tokenizer = tokenizer,
+            .file = file,
+        };
+        return ret;
+    }
 
     /// Initialize and read a new Llama V1 or V2 inference context from a provided GGUF file.
     /// Returns an `Error.BadFile` whenever the file is an unsupported model or quantization
@@ -1022,6 +1080,7 @@ pub const LlamaContext = struct {
         };
 
         return LlamaContext{
+            .a = null,
             .config = config,
             .transformer = transformer,
             .state = state,
@@ -1067,17 +1126,17 @@ pub const LlamaContext = struct {
             }
         } else {
             std.debug.print("llama: Missing tokenizer model {s}\n", .{tokenizer_key});
-            return error.BadFile;
+            return Error.BadFile;
         }
 
         if (file.fileType()) |ft| {
             if (ft != .ALL_F32 and ft != .MOSTLY_Q8_0) {
                 std.debug.print("llama: Unsupported quantization: {}\n", .{ft});
-                return error.BadFile;
+                return Error.BadFile;
             }
         } else {
             std.debug.print("llama: Could not load file type\n", .{});
-            return error.BadFile;
+            return Error.BadFile;
         }
     }
 
@@ -1089,6 +1148,9 @@ pub const LlamaContext = struct {
             inner.deinit();
         }
         self.file = null;
+        if (self.a) |alloc| {
+            alloc.destroy(self);
+        }
     }
 };
 

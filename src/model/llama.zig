@@ -199,8 +199,8 @@ pub const State = struct {
             a,
         );
 
-        const Block = math.Block(.q8_0);
-        const quant_len = math.blockUnitLen(Block);
+        const Block = math.quant.Block(.q8_0);
+        const quant_len = math.quant.blockUnitLen(Block);
         const quant_count = if (config.quantized) config.dim / quant_len else 0;
         const quant_vec = try a.alloc(Block, quant_count);
         const hidden_quant_count = if (config.quantized) config.hidden_dim / quant_len else 0;
@@ -896,7 +896,7 @@ pub const TransformerV1 = struct {
                 @memcpy(out, embeddings);
             },
             .q8_0 => |quantized| {
-                const block_size = math.blockUnitLen(math.Block(.q8_0));
+                const block_size = math.quant.blockUnitLen(math.quant.Block(.q8_0));
                 const block_offset = token_offset / block_size;
                 const n_blocks = dim / block_size;
 

@@ -496,12 +496,12 @@ pub const Transformer = struct {
                 @memcpy(out, embeddings);
             },
             .q8_0 => |quantized| {
-                const block_size = math.blockUnitLen(math.Block(.q8_0));
+                const block_size = math.quant.blockUnitLen(math.quant.Block(.q8_0));
                 const block_offset = token_offset / block_size;
                 const n_blocks = dim / block_size;
 
                 const embeddings = quantized[block_offset .. block_offset + n_blocks];
-                math.dequantizeT(f32, .q8_0, embeddings, out) catch
+                math.quant.dequantizeT(f32, .q8_0, embeddings, out) catch
                     @panic("Terrible situation in embeddings");
             },
             else => {

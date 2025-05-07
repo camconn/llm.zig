@@ -336,16 +336,16 @@ pub const TensorInfo = struct {
 
         switch (self.ggml_type) {
             .F32 => {
-                const ptr: [*]math.Block(.f32) = @ptrFromInt(target);
+                const ptr: [*]math.quant.Block(.f32) = @ptrFromInt(target);
                 return .{ .f32 = ptr[0..len] };
             },
             .F16 => {
-                const ptr: [*]math.Block(.f16) = @ptrFromInt(target);
+                const ptr: [*]math.quant.Block(.f16) = @ptrFromInt(target);
                 return .{ .f16 = ptr[0..len] };
             },
             .Q8_0 => {
-                const Block = comptime math.Block(.q8_0);
-                const block_len = comptime math.blockUnitLen(Block);
+                const Block = comptime math.quant.Block(.q8_0);
+                const block_len = comptime math.quant.blockUnitLen(Block);
                 std.debug.assert(len % block_len == 0);
                 const blocks = len / block_len;
 

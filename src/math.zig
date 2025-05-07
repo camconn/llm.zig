@@ -633,7 +633,7 @@ pub fn matrixMulVec(T: type, out: []T, m: Weights, x: Weights, rows: usize, cols
     switch (m) {
         .f32 => |mm| matrixMulVec_f32(T, out, mm, x.f32, rows, cols),
         .f16 => @panic("f16"),
-        .q8_0 => |mm| matrixMulVec_q8_0(T, out, mm, x.q8_0, rows, cols),
+        .q8_0 => |mm| quant.q80.matrixMulVec_q8_0(T, out, mm, x.q8_0, rows, cols),
         .q6_k => @panic("q6_k"),
         .q4_k => @panic("q4_k"),
     }
@@ -668,63 +668,6 @@ fn matrixMulVec_f32(T: type, out: []T, m: []const f32, x: []const f32, rows: usi
             sum += xs * ms;
         }
 
-        out[row] = @floatCast(sum);
-    }
-}
-
-/// Matrix multiply for Q8_0 quantized weights.
-fn matrixMulVec_q8_0(T: type, out: []T, m: []const Q80Block, x: []const Q80Block, rows: usize, cols: usize) void {
-    const Vec = @Vector(32, i32);
-
-    const block_size = comptime blockUnitLen(Q80Block);
-    const block_log2 = comptime std.math.log2(block_size);
-    std.debug.assert(block_log2 == 5);
-
-    // We can't have leftover weights because both `m` and `x` have chunks of 32 weights because
-    // they are slices of `Q80Block`s
-    const col_blocks = cols >> block_log2;
-
-    for (0..rows) |row| {
-        const m_off = row * col_blocks;
-
-        // For two dequantized number blocks `m` and `n` in Q8_0:
-        //     m_a = s_m * x_a
-        //     n_a = s_n * y_a
-        // Where a ∈ [1, 32].
-        // So m is a vector of elements [m1, m2, ..., m32]
-        //                     And n is [n1, n2, ..., n32]
-        //
-        // Then product of the element pair `a` of `m` and `n` is
-        //     m_a * n_a = s_m * x_a * s_n * y_a = (s_m*s_n) * (x_a*y_a)
-        //
-        // So to find the sum of the element-wise product of `m` and `n` that would be:
-        // (m_1*n_1) + (m_2*n_2) + ...
-        //      = (s_m*x_1 * s_n*y_1) + (s_m*x_2 + s_n*y_2) + ...
-        //      = (s_m*s_n * x_1*y_1) + (s_m*s_n + x_2*y_2) + ...
-        //      = (s_m*s_n) * ((x_1 * y_1) + (x_2 + y_2) + ...)
-        // So we can do an element-wise product then sum the element-wise products to get a partial
-        // results which we multiply by the scaling factors s_m and s_n to get the final sum
-        // of the scaled products.
-        var sum: f32 = 0;
-        for (0.., x) |n, block| {
-            // for each block in xs, gather the xs.
-            const xs: Vec = block.weights;
-
-            const m_idx = m_off + n;
-            const m_block = m[m_idx];
-            const ms: Vec = m_block.weights;
-
-            const x_scale: f32 = @as(f16, @bitCast(block.scale));
-            const m_scale: f32 = @as(f16, @bitCast(m_block.scale));
-            const scale: f32 = x_scale * m_scale;
-
-            const prod = xs * ms;
-            const pre_sum = @reduce(.Add, prod);
-            const prod_sum: f32 = @floatFromInt(pre_sum);
-            const final_sum = prod_sum * scale;
-
-            sum += final_sum;
-        }
         out[row] = @floatCast(sum);
     }
 }

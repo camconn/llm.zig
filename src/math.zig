@@ -79,7 +79,7 @@ const K_SCALE_SIZE = 12;
 
 /// Structure of a `Q6_K` super-block in GGML. See [1] for definition.
 /// A `Q6_K` super-block is 16 sub-blocks of 16 elements each.
-/// Each weight is derived as `w = g * a * d`
+/// Each weight is derived as `w = g * a * d` where `a` is the block scale.
 /// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-common.h#L320
 pub const Q6KBlock = extern struct {
     /// High 4 bits for quantized weights.
@@ -94,6 +94,8 @@ pub const Q6KBlock = extern struct {
 
 /// Structure of a `Q4_K` super-block in GGML. See [1] for definition.
 /// A `Q4_K` super-block is 8 sub-blocks of 32 elements each.
+/// Weights are calculated as `w = q * g + m` where `g` is the weight scale and `m` is the block
+/// minimum.
 /// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-common.h#L285
 pub const Q4KBlock = extern struct {
     /// Superblock aggregate scale
@@ -677,6 +679,25 @@ test "add" {
     try std.testing.expectEqualDeep([_]f32{ 5, 7, 9 }, out);
 }
 
+/// Add `x` and `y` then store into a slice `out` of `T`.
+/// Assumes `x` and `y` to have the same `WeightFormat` or quantization.
+/// Assumes `x`, `y`, and `out` to have the same unit lengths.
+pub fn addWeights(T: type, out: []T, x: Weights, y: Weights) void {
+    same(x, y);
+    const x_len = x.len();
+    const y_len = y.len();
+    std.debug.assert(x_len == y_len);
+    std.debug.assert(x_len == out.len);
+
+    switch (x) {
+        .f32 => |xx| add(f32, out, xx, y.f32),
+        .f16 => |xx| add(f16, out, xx, y.f16),
+        .q8_0 => @panic("q8_0"),
+        .q6_k => @panic("q6_k"),
+        .q4_k => @panic("q4_k"),
+    }
+}
+
 /// Calculate the element-wise product of `x` and `y` then store the result in `out`.
 /// Caller is responsible for ensuring the lengths of `x`, `y`, and `out` are the same.
 pub fn elementProduct(out: []f32, x: []const f32, y: []const f32) void {
@@ -718,11 +739,10 @@ pub fn matrixMulVec(T: type, out: []T, m: Weights, x: Weights, rows: usize, cols
     std.debug.assert(m_len == rows * cols);
     std.debug.assert(same(m, x));
 
-    // Poor man's dynamic dispatch
     switch (m) {
-        .f32 => matrixMulVec_f32(T, out, m.f32, x.f32, rows, cols),
+        .f32 => |mm| matrixMulVec_f32(T, out, mm, x.f32, rows, cols),
         .f16 => @panic("f16"),
-        .q8_0 => matrixMulVec_q8_0(T, out, m.q8_0, x.q8_0, rows, cols),
+        .q8_0 => |mm| matrixMulVec_q8_0(T, out, mm, x.q8_0, rows, cols),
         .q6_k => @panic("q6_k"),
         .q4_k => @panic("q4_k"),
     }
@@ -904,6 +924,16 @@ test "dotProduct" {
     try std.testing.expectEqual(1688, dotProduct(&x, &y));
 }
 
+/// A potential error which can occur during quantization or dequantization.
+pub const QuantError = error{
+    /// The input or output slice for the operation is empty (length 0).
+    Empty,
+    /// There is not enough space in the output slice OR the output slice's
+    /// length does not exactly match the length of quantized or de-quantized
+    /// output for the specified `WeightFormat`.
+    NotEnoughSpace,
+};
+
 /// Quantize weights `ws` from full-size `f32` to their quantized forms.
 /// Caller is responsible for freeing the returned Quantized block array.
 pub fn quantize(
@@ -912,7 +942,7 @@ pub fn quantize(
     out: []Block(format),
 ) !f32 {
     if (ws.len == 0) {
-        return error.Empty;
+        return QuantError.Empty;
     }
 
     // No conversion necessary
@@ -921,10 +951,11 @@ pub fn quantize(
         return 0;
     }
 
-    //const BlockType = Block(format);
-    //const array_info = @typeInfo(std.meta.fieldInfo(BlockType, .weights).type).array;
-    //const block_size = array_info.len;
-    //std.debug.assert(ws.len % block_size == 0);
+    const BlockType = Block(format);
+    const block_size = blockUnitLen(BlockType);
+    std.debug.assert(@mod(ws.len, block_size) == 0);
+    std.debug.assert(@mod(ws.len, block_size) == 0);
+    std.debug.assert(@divExact(ws.len, block_size) == out.len);
 
     const err = switch (format) {
         .q8_0 => quantize_q8_0(ws, out),
@@ -1050,7 +1081,7 @@ fn quantize_q6_k(in: []const f32, blocks: []Q6KBlock) f32 {
         const iscale: f32 = -128 / max_scale;
         blocks[i].scale = @bitCast(@as(f16, @floatCast(1 / iscale)));
         for (0..n_subblocks) |j| {
-            const rounded: i32 = @intFromFloat(std.math.round(iscale * scales[j]));
+            const rounded: i32 = nearest_int(iscale * scales[j]);
             blocks[i].scales[j] = @intCast(@min(127, rounded));
         }
 
@@ -1062,7 +1093,7 @@ fn quantize_q6_k(in: []const f32, blocks: []Q6KBlock) f32 {
 
             for (0..16) |k| {
                 const x = orig[16 * j + k];
-                var l: i32 = @intFromFloat(std.math.round(x / d));
+                var l: i32 = nearest_int(x / d);
                 l = @max(-32, @min(31, l));
                 limit[16 * j + k] = @intCast(l + 32);
             }
@@ -1196,7 +1227,7 @@ fn make_qx_quants(n_max: i32, in: []const f32, out: []i8, rmse_type: i8, qw: ?[]
 
         if (suml2 > 0 and sumlx * sumlx > best * suml2) {
             for (0..n, in) |i, x| {
-                const l: i32 = @intFromFloat(std.math.round(iscale * x));
+                const l: i32 = nearest_int(iscale * x);
                 const l_clamp = std.math.clamp(l, -n_max, n_max - 1);
                 out[i] = @intCast(n_max + l_clamp);
             }
@@ -1235,9 +1266,9 @@ fn quantize_q4_k(in: []const f32, blocks: []Q4KBlock) f32 {
                 const x = block[32 * j + l];
                 sum_x2 += x * x;
             }
-            const root_avg = @sqrt(sum_x2 / 32);
+            const av_x = @sqrt(sum_x2 / 32);
             for (0..32) |l| {
-                weights[l] = root_avg + @abs(block[j * 32 + l]);
+                weights[l] = av_x + @abs(block[j * 32 + l]);
             }
             scales[j] = make_qkx2_quants(15, block[j * 32 ..][0..32], &weights, limit[j * 32 ..][0..32], &mins[j], &limit_aux, -1, 0.1, 20, false);
 
@@ -1256,8 +1287,8 @@ fn quantize_q4_k(in: []const f32, blocks: []Q4KBlock) f32 {
         const inv_min =   if (max_min > 0)   63 / max_min   else 0;
         // zig fmt: on
         for (0..@divExact(QK_K, 32)) |j| {
-            var ls: u8 = @intFromFloat(std.math.round(inv_scale * scales[j]));
-            var lm: u8 = @intFromFloat(std.math.round(inv_min * mins[j]));
+            var ls: u8 = @intCast(nearest_int(inv_scale * scales[j]));
+            var lm: u8 = @intCast(nearest_int(inv_min * mins[j]));
             ls = @min(63, ls);
             lm = @min(63, lm);
 
@@ -1276,10 +1307,8 @@ fn quantize_q4_k(in: []const f32, blocks: []Q4KBlock) f32 {
         out_block.agg.dmin = @bitCast(@as(f16, @floatCast(max_min   / 63)));
         // zig fmt: on
 
-        var sc: u8 = undefined;
-        var m: u8 = undefined;
         inner: for (0..@divExact(QK_K, 32)) |j| {
-            get_scale_min_k4(j, &out_block.scale, &sc, &m);
+            const sc, const m = get_scale_min_k4(j, &out_block.scale);
             const d = @as(f32, @floatCast(@as(f16, @bitCast(out_block.agg.d)))) * @as(f32, @floatFromInt(sc));
 
             if (d == 0) continue :inner;
@@ -1287,7 +1316,7 @@ fn quantize_q4_k(in: []const f32, blocks: []Q4KBlock) f32 {
             const dm = @as(f32, @floatCast(@as(f16, @bitCast(out_block.agg.dmin)))) * @as(f32, @floatFromInt(m));
 
             for (0..32) |k| {
-                var l: i32 = @intFromFloat(std.math.round((block[32 * j + k] + dm) / d));
+                var l: i32 = nearest_int((block[32 * j + k] + dm) / d);
                 l = std.math.clamp(l, 0, 15);
                 limit[32 * j + k] = @intCast(l);
             }
@@ -1309,16 +1338,27 @@ fn quantize_q4_k(in: []const f32, blocks: []Q4KBlock) f32 {
 
 /// Port of implementation of `get_scale_min_k4` from ggml [1].
 /// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-quants.c#L631
-inline fn get_scale_min_k4(j: usize, q: []const u8, d: *u8, m: *u8) void {
+inline fn get_scale_min_k4(j: usize, q: []const u8) struct { u8, u8 } {
     if (j < 4) {
-        d.* = q[j] & 63;
-        m.* = q[j + 4] & 63;
+        return .{
+            // zig fmt: off
+            q[j]   & 0x3f,
+            q[j+4] & 0x3f,
+            // zig fmt: on
+        };
     } else {
-        // zig fmt: off
-        d.* = (q[j+4] & 0x0f) | ((q[j-4] >> 6) << 4);
-        m.* = (q[j+4] >>   4) | ((q[j-0] >> 6) << 4);
-        // zig fmt: on
+        return .{
+            // zig fmt: off
+            (q[j+4] & 0x0f) | ((q[j-4] >> 6) << 4),
+            (q[j+4] >>   4) | ((q[j-0] >> 6) << 4),
+            // zig fmt: on
+        };
     }
+}
+
+/// Port of `nearest_int` from `ggml-quants.c`.
+inline fn nearest_int(value: f32) i32 {
+    return @intFromFloat(std.math.round(value));
 }
 
 /// This is a straightforward port of `make_qkx2_quants` from ggml [1].
@@ -1342,12 +1382,8 @@ fn make_qkx2_quants(
     var sum_x = sum_w * x[0];
 
     for (1..n, x[1..]) |i, xx| {
-        if (xx < min) {
-            min = xx;
-        }
-        if (xx > max) {
-            max = xx;
-        }
+        if (xx < min) min = xx;
+        if (xx > max) max = xx;
 
         const w = weights[i];
         sum_w += w;
@@ -1368,7 +1404,7 @@ fn make_qkx2_quants(
     var scale = 1 / iscale;
     var best_mad: f32 = 0;
     for (0..n, x) |i, xx| {
-        const l: i64 = @intFromFloat(std.math.round(iscale * (xx - min)));
+        const l: i64 = nearest_int(iscale * (xx - min));
         limit[i] = @intCast(std.math.clamp(l, 0, n_max));
         var diff = scale * @as(f32, @floatFromInt(limit[i])) + min - xx;
         diff = if (use_mad) @abs(diff) else diff * diff;
@@ -1388,7 +1424,7 @@ fn make_qkx2_quants(
         var sum_xl: f32 = 0;
 
         for (0..n, x) |i, xx| {
-            var l: i64 = @intFromFloat(std.math.round(iscale * (xx - min)));
+            var l: i64 = nearest_int(iscale * (xx - min));
             l = std.math.clamp(l, 0, n_max);
 
             limit_aux[i] = @intCast(l);
@@ -1411,7 +1447,7 @@ fn make_qkx2_quants(
 
             var mad: f32 = 0;
             for (0..n, x) |i, xx| {
-                var diff = this_scale * @as(f32, @floatFromInt(limit[i])) + this_min - xx;
+                var diff = this_scale * @as(f32, @floatFromInt(limit_aux[i])) + this_min - xx;
                 diff = if (use_mad) @abs(diff) else diff * diff;
                 const w = weights[i];
                 mad += w * diff;
@@ -1465,6 +1501,7 @@ pub fn dequantize(
 }
 
 /// De-quantize weights to an array of type `T`.
+/// Requires that `out` exactly matches the size of the de-quantized output of `weights` for `format`.
 pub fn dequantizeT(
     T: type,
     comptime format: WeightFormat,
@@ -1473,10 +1510,25 @@ pub fn dequantizeT(
 ) !void {
     floatOnly(T);
     if (weights.len == 0) {
-        return error.Empty;
+        return QuantError.Empty;
     }
 
+    const BlockType = @typeInfo(@TypeOf(weights)).pointer.child;
+    const block_size = blockUnitLen(BlockType);
+    const weights_out_len = block_size * weights.len;
+    if (out.len != weights_out_len) {
+        return QuantError.NotEnoughSpace;
+    }
+
+    // Superfluous with above, but included just in case.
+    std.debug.assert(@mod(out.len, block_size) == 0);
+    std.debug.assert(@divExact(out.len, block_size) == weights.len);
+
     if (format == .f32 or format == .f16) {
+        // Check that the pointers are different so we don't violate `noalias`.
+        if (@intFromPtr(out.ptr) != @intFromPtr(weights.ptr)) {
+            std.mem.doNotOptimizeAway(@memcpy(out, weights));
+        }
         return;
     }
 
@@ -1484,7 +1536,7 @@ pub fn dequantizeT(
         .q8_0 => dequantize_q8_0(T, weights, out),
         .q6_k => dequantize_q6_k(T, weights, out),
         .q4_k => dequantize_q4_k(T, weights, out),
-        else => @compileError("dequantize method is unimplemented for " ++ @typeName(format)),
+        else => @compileError("dequantize method is unimplemented for " ++ @tagName(format)),
     }
 }
 
@@ -1516,11 +1568,7 @@ fn dequantize_q8_0(T: type, in: []const Q80Block, out: []T) void {
 /// Refer to `dequantize_row_q6_K` in GGML [1] for the reference implementation.
 /// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-quants.c#L1690
 fn dequantize_q6_k(T: type, in: []const Q6KBlock, out: []T) void {
-    const BlockType = Q6KBlock;
-    const block_size = blockUnitLen(BlockType);
-
-    std.debug.assert(@mod(out.len, block_size) == 0);
-    std.debug.assert(@divExact(out.len, block_size) == in.len);
+    const block_size = blockUnitLen(Q6KBlock);
 
     for (0.., in) |i, block| {
         const offset = i * block_size;
@@ -1576,14 +1624,10 @@ fn dequantize_q6_k(T: type, in: []const Q6KBlock, out: []T) void {
 /// Refer to `dequantize_row_q4_K` in GGML [1] for the reference implementation.
 /// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-quants.c#L1280
 fn dequantize_q4_k(T: type, in: []const Q4KBlock, out: []T) void {
-    const BlockType = Q4KBlock;
-    const block_size = blockUnitLen(BlockType);
-
-    std.debug.assert(@mod(out.len, block_size) == 0);
-    std.debug.assert(@divExact(out.len, block_size) == in.len);
+    const block_size = blockUnitLen(Q4KBlock);
 
     for (0.., in) |i, *block| {
-        var out_block = out[i * QK_K ..][0..QK_K];
+        var out_block = out[i * block_size ..][0..block_size];
 
         const weights = block.weights;
 
@@ -1591,28 +1635,26 @@ fn dequantize_q4_k(T: type, in: []const Q4KBlock, out: []T) void {
         const min: f32 = @as(f16, @bitCast(block.agg.dmin));
 
         var is: usize = 0;
-        var sc: u8 = undefined;
-        var m: u8 = undefined;
         for (0..@divExact(QK_K, 64)) |jj| {
             const j = jj * 64;
 
             const q = weights[jj * 32 .. (jj + 1) * 32][0..32];
 
             // zig fmt: off
-            get_scale_min_k4(is + 0, &block.scale, &sc, &m);
-            const d1 = d   * @as(f32, @floatFromInt(sc));
-            const m1 = min * @as(f32, @floatFromInt(m));
-            get_scale_min_k4(is + 1, &block.scale, &sc, &m);
-            const d2 = d   * @as(f32, @floatFromInt(sc));
-            const m2 = min * @as(f32, @floatFromInt(m));
+            const sc1, const m1 = get_scale_min_k4(is + 0, &block.scale);
+            const scale1 = d   * @as(f32, @floatFromInt(sc1));
+            const min1   = min * @as(f32, @floatFromInt(m1));
+            const sc2, const m2 = get_scale_min_k4(is + 1, &block.scale);
+            const scale2 = d   * @as(f32, @floatFromInt(sc2));
+            const min2   = min * @as(f32, @floatFromInt(m2));
             // zig fmt: on
 
             for (0..32) |l| {
-                const result = d1 * @as(f32, @floatFromInt(q[l] & 0x0f)) - m1;
+                const result = scale1 * @as(f32, @floatFromInt(q[l] & 0x0f)) - min1;
                 out_block[j + l] = @floatCast(result);
             }
             for (0..32) |l| {
-                const result = d2 * @as(f32, @floatFromInt(q[l] >> 4)) - m2;
+                const result = scale2 * @as(f32, @floatFromInt(q[l] >> 4)) - min2;
                 out_block[j + l + 32] = @floatCast(result);
             }
             is += 2;
@@ -1639,68 +1681,37 @@ test "dequantize weights" {
     try std.testing.expectEqualSlices(f32, &no_scale, &out);
 }
 
-test "dequantize(quantize(input)) q6_k and q4_k" {
-    const input = [_]f32{
-        0.26818057, 0.70117421, 0.80591067, 0.23019514, 0.14670639,
-        0.33391678, 0.52973484, 0.45318381, 0.64022398, 0.28994352,
-        0.57440085, 0.42841502, 0.00551542, 0.40409434, 0.84484653,
-        0.44737177, 0.75096818, 0.81511407, 0.07341571, 0.82394374,
-        0.29827766, 0.87487497, 0.13257837, 0.60109425, 0.95626913,
-        0.99961994, 0.42491646, 0.73456629, 0.91688578, 0.96441928,
-        0.98533557, 0.29554028, 0.01003327, 0.48162975, 0.29975987,
-        0.91495502, 0.06700391, 0.68019735, 0.73848713, 0.90355828,
-        0.63185128, 0.57677257, 0.4724628,  0.22348524, 0.40015188,
-        0.01129494, 0.2232572,  0.63723492, 0.44318981, 0.80601651,
-        0.76156629, 0.04124412, 0.35788252, 0.28793633, 0.19582641,
-        0.89765805, 0.36163506, 0.94240101, 0.71120837, 0.67068579,
-        0.30092527, 0.35680559, 0.45040693, 0.13315413, 0.29537174,
-        0.81972883, 0.59423547, 0.87172982, 0.33067438, 0.49248542,
-        0.57059288, 0.65961179, 0.89193526, 0.40634174, 0.20658933,
-        0.22735729, 0.09656759, 0.78862714, 0.48417093, 0.65754907,
-        0.27845261, 0.98663917, 0.59444545, 0.97350248, 0.47614487,
-        0.14190687, 0.60782982, 0.6795271,  0.02671968, 0.34116549,
-        0.85415479, 0.29213184, 0.41548042, 0.270123,   0.96003289,
-        0.6622112,  0.98637266, 0.26190177, 0.48180395, 0.55795777,
-        0.68291425, 0.98164342, 0.45446764, 0.17571396, 0.23874598,
-        0.86202598, 0.48569754, 0.50599026, 0.16404926, 0.52368819,
-        0.94225083, 0.43053954, 0.72541556, 0.70928258, 0.66261289,
-        0.30840945, 0.35910923, 0.84805918, 0.49627614, 0.89978007,
-        0.44581439, 0.35289054, 0.680217,   0.15880314, 0.40756339,
-        0.39369585, 0.51360553, 0.29971385, 0.0489201,  0.09508946,
-        0.19150976, 0.7781581,  0.21683124, 0.24743186, 0.82869239,
-        0.77427872, 0.60696236, 0.52352254, 0.71968511, 0.41509592,
-        0.75652485, 0.00477548, 0.44399738, 0.0083799,  0.06323526,
-        0.9399441,  0.50391666, 0.83552948, 0.86409024, 0.21936696,
-        0.73748613, 0.15461877, 0.75467339, 0.25872051, 0.95171161,
-        0.49709519, 0.45294659, 0.05595667, 0.23729637, 0.3410649,
-        0.81303617, 0.45054132, 0.83502449, 0.79948996, 0.43303826,
-        0.24817904, 0.12250606, 0.48479977, 0.49849821, 0.55752783,
-        0.08789795, 0.3937892,  0.45096781, 0.9832385,  0.69866774,
-        0.27155947, 0.20381776, 0.2952266,  0.79640404, 0.5835283,
-        0.76363749, 0.35736668, 0.02409709, 0.1042234,  0.25845312,
-        0.88851827, 0.98197504, 0.41783902, 0.97035122, 0.34065692,
-        0.47798785, 0.49641774, 0.60678651, 0.89854009, 0.09507555,
-        0.94297451, 0.29527169, 0.31350958, 0.06369393, 0.79253947,
-        0.43072594, 0.40610705, 0.26861318, 0.86756347, 0.70624882,
-        0.640259,   0.6834766,  0.78367339, 0.34724362, 0.7311883,
-        0.07728095, 0.78759387, 0.46740117, 0.01972796, 0.94352436,
-        0.30881627, 0.70998402, 0.98331121, 0.72531005, 0.64998247,
-        0.43503533, 0.89006498, 0.38304409, 0.05804393, 0.21076824,
-        0.00841365, 0.83931816, 0.76405042, 0.26303586, 0.58260129,
-        0.43186932, 0.34278714, 0.98516938, 0.11636042, 0.60443262,
-        0.74488765, 0.9179661,  0.70137441, 0.32111254, 0.92630706,
-        0.34251309, 0.97879491, 0.71861436, 0.63012254, 0.63813117,
-        0.52341741, 0.3441749,  0.57462094, 0.24646284, 0.57768118,
-        0.78210324, 0.21352484, 0.27498262, 0.63415368, 0.95555718,
-        0.11141753,
-    };
+test "dequantize(quantize(input)) q8_0, q6_k, and q4_k" {
+    const file = @embedFile("assets/q6_k.json");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const case = try std.json.parseFromSliceLeaky(@This().QuantizationTestCase, alloc, file, .{});
+    const input = case.input;
+    const input_len: f32 = @floatFromInt(input.len);
+    const out_len = 512;
 
     // Check that implementations are correct by quantizing and then dequantizing, then check
     // the root mean square error.
     // check q6_k
-    var q6_out = [_]Q6KBlock{std.mem.zeroes(Q6KBlock)} ** 1;
-    _ = try quantize(.q6_k, &input, q6_out[0..]);
-    var dequantized_q6 = [_]f32{0} ** 256;
+    var q8_out = [_]Q80Block{std.mem.zeroes(Q80Block)} ** (512 / blockUnitLen(Q80Block));
+    _ = try quantize(.q8_0, input, q8_out[0..]);
+    var dequantized_q8 = [_]f32{0} ** out_len;
+    _ = try dequantizeT(f32, .q8_0, &q8_out, dequantized_q8[0..]);
+    var sum_err2_q8: f32 = 0;
+    for (0.., input) |i, expected| {
+        const diff = expected - dequantized_q8[i];
+        try std.testing.expectApproxEqAbs(expected, dequantized_q8[i], 0.1);
+        sum_err2_q8 += diff * diff;
+    }
+    const rmse_q8 = @sqrt(sum_err2_q8 / input_len);
+    try std.testing.expect(rmse_q8 < 0.01);
+
+    // check q6_k
+    var q6_out = [_]Q6KBlock{std.mem.zeroes(Q6KBlock)} ** 2;
+    _ = try quantize(.q6_k, input, q6_out[0..]);
+    var dequantized_q6 = [_]f32{0} ** out_len;
     _ = try dequantizeT(f32, .q6_k, &q6_out, dequantized_q6[0..]);
     var sum_err2_q6: f32 = 0;
     for (0.., input) |i, expected| {
@@ -1708,13 +1719,13 @@ test "dequantize(quantize(input)) q6_k and q4_k" {
         try std.testing.expectApproxEqAbs(expected, dequantized_q6[i], 0.1);
         sum_err2_q6 += diff * diff;
     }
-    const rmse_q6 = @sqrt(sum_err2_q6 / input.len);
+    const rmse_q6 = @sqrt(sum_err2_q6 / input_len);
     try std.testing.expect(rmse_q6 < 0.01);
 
     // check q4_k
-    var out_q4 = [_]Q4KBlock{std.mem.zeroes(Q4KBlock)};
-    _ = try quantize(.q4_k, &input, &out_q4);
-    var dequantized_q4 = [_]f32{0} ** QK_K;
+    var out_q4 = [_]Q4KBlock{std.mem.zeroes(Q4KBlock)} ** 2;
+    _ = try quantize(.q4_k, input, &out_q4);
+    var dequantized_q4 = [_]f32{0} ** out_len;
     try dequantize(.q4_k, &out_q4, &dequantized_q4);
 
     var sum_err2_q4: f32 = 0;
@@ -1723,6 +1734,80 @@ test "dequantize(quantize(input)) q6_k and q4_k" {
         try std.testing.expect(diff < 0.15);
         sum_err2_q4 += diff * diff;
     }
-    const rmse_q4 = @sqrt(sum_err2_q4 / input.len);
+    const rmse_q4 = @sqrt(sum_err2_q4 / input_len);
     try std.testing.expect(rmse_q4 < 0.02);
+}
+
+// LCOV_EXCL_START
+pub usingnamespace if (@import("builtin").is_test) struct {
+    /// Helper for reading quantization test case data.
+    const QuantizationTestCase = struct {
+        /// Input original floating point tensor.
+        input: []f32,
+        /// Expected result of quantization.
+        quant_ref: []u8,
+        /// Expected result after de-quantizing the quantization.
+        dequant_ref: []f32,
+    };
+};
+// LCOV_EXCL_STOP
+
+test "Q4_K quantization reference JSON" {
+    const file = @embedFile("assets/q4_k.json");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const case = try std.json.parseFromSliceLeaky(@This().QuantizationTestCase, alloc, file, .{});
+
+    const input = case.input;
+    const quantization_exp_bs: []const Q4KBlock = @alignCast(std.mem.bytesAsSlice(Q4KBlock, case.quant_ref));
+    var quantized_actual = [_]Q4KBlock{std.mem.zeroes(Q4KBlock)} ** 2;
+    _ = try quantize(.q4_k, input, &quantized_actual);
+    try std.testing.expectEqualSlices(Q4KBlock, quantization_exp_bs, &quantized_actual);
+
+    var dequantized_actual = [_]f32{0} ** (QK_K * 2);
+    try dequantize(.q4_k, &quantized_actual, &dequantized_actual);
+    try std.testing.expectEqualSlices(f32, case.dequant_ref, &dequantized_actual);
+}
+
+test "Q6_K quantization reference JSON" {
+    const file = @embedFile("assets/q6_k.json");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const case = try std.json.parseFromSliceLeaky(@This().QuantizationTestCase, alloc, file, .{});
+
+    const input = case.input;
+    const quantization_exp_bs: []const Q6KBlock = @alignCast(std.mem.bytesAsSlice(Q6KBlock, case.quant_ref));
+    var quantized_actual = [_]Q6KBlock{std.mem.zeroes(Q6KBlock)} ** 2;
+    _ = try quantize(.q6_k, input, &quantized_actual);
+    try std.testing.expectEqualSlices(Q6KBlock, quantization_exp_bs, &quantized_actual);
+
+    var dequantized_actual = [_]f32{0} ** (QK_K * 2);
+    try dequantize(.q6_k, &quantized_actual, &dequantized_actual);
+    try std.testing.expectEqualSlices(f32, case.dequant_ref, &dequantized_actual);
+}
+
+test "Q8_0 quantization reference JSON" {
+    const file = @embedFile("assets/q8_0.json");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const case = try std.json.parseFromSliceLeaky(@This().QuantizationTestCase, alloc, file, .{});
+
+    const input = case.input;
+    const quantization_exp_bs: []const Q80Block = @alignCast(std.mem.bytesAsSlice(Q80Block, case.quant_ref));
+    var quantized_actual = [_]Q80Block{std.mem.zeroes(Q80Block)} ** (QK_K * 2 / blockUnitLen(Q80Block));
+    _ = try quantize(.q8_0, input, &quantized_actual);
+    try std.testing.expectEqualSlices(Q80Block, quantization_exp_bs, &quantized_actual);
+
+    var dequantized_actual = [_]f32{0} ** (QK_K * 2);
+    try dequantize(.q8_0, &quantized_actual, &dequantized_actual);
+    try std.testing.expectEqualSlices(f32, case.dequant_ref, &dequantized_actual);
 }

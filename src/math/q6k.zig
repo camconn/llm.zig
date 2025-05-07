@@ -21,7 +21,7 @@ const QK_K = quant.QK_K;
 pub const Q6KBlock = extern struct {
     /// High 4 bits for quantized weights.
     weights_lo: [@divExact(QK_K, 2)]u8,
-    /// Low 4 bits for quantized weights.
+    /// Upper 2 bits for quantized weights.
     weights_hi: [@divExact(QK_K, 4)]u8,
     /// Quantized 8-bit scale.
     scales: [@divExact(QK_K, 16)]i8,

@@ -45,6 +45,42 @@ pub fn dequantize_q6_k(T: type, in: []const Q6KBlock, out: []T) void {
         const w_hi = block.weights_hi;
         const scales = block.scales;
 
+        for (0..QK_K) |j| {
+            const half = j / 128;
+
+            const lo_idx = @mod(j, 64) + half * 64;
+            const hi_idx = @mod(j, 32) + half * 32;
+            const scale_idx = j / 16;
+
+            const lo_shift: u3 = @truncate(@mod(j / 64, 2) * 4);
+            const hi_shift: u3 = @truncate(@mod((j / 32) * 2, 8));
+
+            const lo = (w_lo[lo_idx] >> lo_shift) & 0x0f;
+            const hi = (w_hi[hi_idx] >> hi_shift) & 0x03;
+
+            const sc: f32 = @floatFromInt(scales[scale_idx]);
+
+            const w: i8 = @bitCast((hi << 4) | lo); //always safe, top 2 bits always `0`
+            const w_f: f32 = @floatFromInt(w -% 32);
+
+            const weight: f32 = @floatCast(superblock_scale * sc * w_f);
+            out[offset + j] = weight;
+        }
+    }
+}
+
+pub fn dequantize_q6_k2(T: type, in: []const Q6KBlock, out: []T) void {
+    const block_size = blockUnitLen(Q6KBlock);
+
+    for (0.., in) |i, block| {
+        const offset = i * block_size;
+
+        const superblock_scale: f32 = @as(f16, @bitCast(block.scale));
+
+        const w_lo = block.weights_lo;
+        const w_hi = block.weights_hi;
+        const scales = block.scales;
+
         for (0..@divExact(QK_K, 128)) |j| {
             const n = j * 128;
             const y = &out[offset + n ..][0..128];
@@ -56,28 +92,34 @@ pub fn dequantize_q6_k(T: type, in: []const Q6KBlock, out: []T) void {
 
             // The reference code has something equivalent to this unrolled.
             // This version rolled-up version for is here for readability.
-            for (0..32) |l| {
-                const scale_base = l / 16;
-                const hi_src = hi[l];
+            for (0..4) |k| {
+                const hi_shift: u3 = @truncate(k * 2);
+                const lo_shift: u3 = @truncate((k / 2) * 4);
+                const l_jump = @as(usize, @intFromBool(k & 1 == 1)) * 32;
+                const scale_offset = k * 2;
 
-                // Inline because the original version probably inlined this for speed
-                inline for (0..4) |k| {
-                    const hi_shift: u3 = @truncate(k * 2);
-                    const lo_shift: u3 = @truncate((k / 2) * 4);
+                for (0..32) |l| {
+                    const scale_base = l / 16;
+                    const hi_src = hi[l];
 
-                    const l_jump = @as(usize, @intFromBool(k & 1 == 1)) * 32;
                     const loo = l + l_jump;
 
                     const lo_nibble = ((lo[loo] >> lo_shift) & 0x0f);
                     const hi_nibble = (((hi_src >> hi_shift) & 3) << 4);
 
-                    const scale_offset = k * 2;
                     const sco: f32 = @floatFromInt(sc[scale_base + scale_offset]);
 
                     const wt: i8 = @intCast(hi_nibble | lo_nibble);
                     const wt_f: f32 = @floatFromInt(wt -% 32);
 
                     const yo = superblock_scale * sco * wt_f;
+
+                    //const out_idx = offset + n + l + k * 32;
+                    //const lo_off = j * 64 + loo;
+                    //const hi_off = j * 32 + l;
+                    //const scale_total = j * 8 + scale_base + scale_offset;
+                    //std.debug.print("{},{},{},{},{},{}\n", .{ out_idx, lo_off, hi_off, scale_total, lo_shift, hi_shift });
+
                     y.*[l + k * 32] = @floatCast(yo);
                 }
             }
@@ -88,7 +130,7 @@ pub fn dequantize_q6_k(T: type, in: []const Q6KBlock, out: []T) void {
 /// Dequantize `in` from the `Q6_K` quantization format into `T` float values.
 /// Refer to `dequantize_row_q6_K` in GGML [1] for the reference implementation.
 /// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-quants.c#L1690
-fn dequantize_q6_k_ref(T: type, in: []const Q6KBlock, out: []T) void {
+pub fn dequantize_q6_k_ref(T: type, in: []const Q6KBlock, out: []T) void {
     const block_size = blockUnitLen(Q6KBlock);
 
     for (0.., in) |i, block| {

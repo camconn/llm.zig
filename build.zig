@@ -78,4 +78,24 @@ pub fn build(b: *std.Build) void {
     // This will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run LLM inference");
     run_step.dependOn(&run_cmd.step);
+
+    // ========================================
+    // Benchmark Options
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("llm", lib_mod);
+    const bench_exe = b.addExecutable(.{
+        .name = "llm_bench",
+        .root_module = bench_mod,
+        .optimize = .ReleaseFast,
+    });
+    b.installArtifact(bench_exe);
+
+    const bench_cmd = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Benchmark Math Kernels");
+    bench_step.dependOn(b.getInstallStep());
+    bench_step.dependOn(&bench_cmd.step);
 }

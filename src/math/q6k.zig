@@ -54,14 +54,72 @@ pub fn dequantize_q6_k(T: type, in: []const Q6KBlock, out: []T) void {
 
             const sc = scales[j * 8 .. (j + 1) * 8];
 
+            // The reference code has something equivalent to this unrolled.
+            // This version rolled-up version for is here for readability.
+            for (0..32) |l| {
+                const scale_base = l / 16;
+                const hi_src = hi[l];
+
+                // Inline because the original version probably inlined this for speed
+                inline for (0..4) |k| {
+                    const hi_shift: u3 = @truncate(k * 2);
+                    const lo_shift: u3 = @truncate((k / 2) * 4);
+
+                    const l_jump = @as(usize, @intFromBool(k & 1 == 1)) * 32;
+                    const loo = l + l_jump;
+
+                    const lo_nibble = ((lo[loo] >> lo_shift) & 0x0f);
+                    const hi_nibble = (((hi_src >> hi_shift) & 3) << 4);
+
+                    const scale_offset = k * 2;
+                    const sco: f32 = @floatFromInt(sc[scale_base + scale_offset]);
+
+                    const wt: i8 = @intCast(hi_nibble | lo_nibble);
+                    const wt_f: f32 = @floatFromInt(wt -% 32);
+
+                    const yo = superblock_scale * sco * wt_f;
+                    y.*[l + k * 32] = @floatCast(yo);
+                }
+            }
+        }
+    }
+}
+
+/// Dequantize `in` from the `Q6_K` quantization format into `T` float values.
+/// Refer to `dequantize_row_q6_K` in GGML [1] for the reference implementation.
+/// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-quants.c#L1690
+fn dequantize_q6_k_ref(T: type, in: []const Q6KBlock, out: []T) void {
+    const block_size = blockUnitLen(Q6KBlock);
+
+    for (0.., in) |i, block| {
+        const offset = i * block_size;
+
+        const superblock_scale: f32 = @as(f16, @bitCast(block.scale));
+
+        const w_lo = block.weights_lo;
+        const w_hi = block.weights_hi;
+        const scales = block.scales;
+
+        for (0..@divExact(QK_K, 128)) |j| {
+            const n = j * 128;
+            const y = &out[offset + n ..][0..128];
+
+            const lo = w_lo[j * 64 .. (j + 1) * 64];
+            const hi = w_hi[j * 32 .. (j + 1) * 32];
+
+            const sc = scales[j * 8 .. (j + 1) * 8];
+
             for (0..32) |l| {
                 const is = l / 16;
 
+                const l0 = l + 0;
+                const l1 = l + 32;
+
                 // zig fmt: off
-                const q1: i8 = @intCast((lo[l +  0] & 0x0f) | (((hi[l] >> 0) & 3) << 4));
-                const q2: i8 = @intCast((lo[l + 32] & 0x0f) | (((hi[l] >> 2) & 3) << 4));
-                const q3: i8 = @intCast((lo[l +  0]   >> 4) | (((hi[l] >> 4) & 3) << 4));
-                const q4: i8 = @intCast((lo[l + 32]   >> 4) | (((hi[l] >> 6) & 3) << 4));
+                const q1: i8 = @intCast((lo[l0] & 0x0f) | (((hi[l] >> 0) & 3) << 4));
+                const q2: i8 = @intCast((lo[l1] & 0x0f) | (((hi[l] >> 2) & 3) << 4));
+                const q3: i8 = @intCast((lo[l0]   >> 4) | (((hi[l] >> 4) & 3) << 4));
+                const q4: i8 = @intCast((lo[l1]   >> 4) | (((hi[l] >> 6) & 3) << 4));
                 // zig fmt: on
 
                 const sc1: f32 = @floatFromInt(sc[is + 0]);

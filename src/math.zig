@@ -717,6 +717,101 @@ test "matrixMul f32" {
     try std.testing.expectEqualDeep(expect12, out12);
 }
 
+/// Multiply a matrix `a` of `m` by `n` with a matrix `b` of `n` by `p` into `out`.
+/// The format of the sizes for `a` and `b` is rows by cols, or `m` by `n` and `n` by `p`.
+///
+/// Requires `a` and `b` to have the same `WeightFormat`, and that `out` is `m` by `n`.
+/// `T` must be a floating point type.
+pub fn matrixMulMatrix(T: type, out: []T, a: Weights, b: Weights, m: usize, n: usize, p: usize) void {
+    floatOnly(T);
+    std.debug.assert(same(a, b));
+
+    std.debug.assert(a.len() == m * n);
+    std.debug.assert(b.len() == n * p);
+    std.debug.assert(out.len == m * p);
+
+    switch (a) {
+        .f32 => |aa| matrixMulMatrix_f32(T, out, aa, b.f32, m, n, p),
+        else => @panic("Unimplemented format"),
+    }
+}
+
+/// Naïve general matrix multiplication for `f32` weight arrays.
+fn matrixMulMatrix_f32(T: type, out: []T, a: []const f32, b: []const f32, m: usize, n: usize, p: usize) void {
+    // Go by row in `a` and column in `b` and write the result to out.
+    for (0..m) |i| { // row in a
+        for (0..p) |j| { // col in b
+            out[i * p + j] = 0;
+            for (0..n) |k| { // dot product in shared dimension
+                // take product of a(i, k) and b(k, j).
+                out[i * p + j] += a[i * n + k] * b[k * p + j];
+            }
+        }
+    }
+}
+
+test "matrixMulMatrix f32 + scratch" {
+    var out = [_]f32{0} ** 24;
+
+    var a = [_]f32{ 3, 4, 2.5, 8, 8, -3, 7, 7, -3, -2, -4, 0 };
+    var b = [_]f32{ 5, 0, 3, 4, 2.5, 8, -3, -7 };
+    const expected = [_]f32{
+        25,  32,  -3, -16, 32.5, 64, -16.5, -46, 32.5, -24, 33, 53, 52.5, 56, 0, -21,
+        -20, -16, -3, 2,   -20,  0,  -12,   -16,
+    };
+    matrixMulMatrix(f32, &out, .{ .f32 = &a }, .{ .f32 = &b }, 6, 2, 4);
+    try std.testing.expectEqualSlices(f32, &expected, &out);
+    @memset(out[0..], 0);
+
+    var scratch = [_]f32{0} ** 8;
+    matrixMulMatrixScratch(f32, &out, .{ .f32 = &a }, .{ .f32 = &b }, &scratch, 6, 2, 4);
+    try std.testing.expectEqualSlices(f32, &expected, &out);
+}
+
+// TODO: This is unsound if `a` and `b` are quantized
+/// Multiply a matrix `a` of `m` by `n` with a matrix `b` of `n` by `p` into `out` with scratchpad.
+/// The format of the sizes for `a` and `b` is rows by cols, or `m` by `n` and `n` by `p`.
+///
+/// This method generally performs faster than its counterpart `matrixMulMatrix` by tranposing `b`
+/// into column-major order then performing the multiply.
+///
+/// Requires `a` and `b` to have the same `WeightFormat`, and that `out` is `m` by `n`.
+/// `T` must be a floating point type.
+fn matrixMulMatrixScratch(T: type, out: []T, a: Weights, b: Weights, scratch: []T, m: usize, n: usize, p: usize) void {
+    floatOnly(T);
+    std.debug.assert(same(a, b));
+    std.debug.assert(a.len() == m * n);
+    std.debug.assert(b.len() == n * p);
+    std.debug.assert(b.len() == scratch.len);
+    std.debug.assert(out.len == m * p);
+
+    switch (a) {
+        .f32 => |aa| matrixMulMatrixScratch_f32(T, out, aa, b.f32, scratch, m, n, p),
+        else => @panic("Unimplemented"),
+    }
+}
+
+// TODO: This is unsound if `a` and `b` are quantized
+fn matrixMulMatrixScratch_f32(T: type, out: []T, a: []const f32, b: []const f32, scratch: []f32, m: usize, n: usize, p: usize) void {
+    transpose(T, scratch, b, n, p);
+    const bT = scratch;
+
+    // `b` is n rows with p cols
+    //   (i,j) is at address i*p + j
+    // `bT` is p rows with n cols
+    //   (i,j) is at address i*n + i
+    // and since transpose(b) = bT, that means
+    //   b(i,j) = bT(j,i) = bT[j*n + i]
+    for (0..m) |i| { // row in a
+        for (0..p) |j| { // row in bT
+            out[i * p + j] = 0;
+            for (0..n) |k| {
+                out[i * p + j] += a[n * i + k] * bT[n * j + k];
+            }
+        }
+    }
+}
+
 /// Find the dot product of two vectors `x` and `y`.
 /// Caller is responsible for ensuring that both vectors have equal lengths.
 pub fn dotProduct(x: []const f32, y: []const f32) f32 {
@@ -756,4 +851,30 @@ test "dotProduct" {
     const x = [_]f32{ 9, 13, 13, 7, 8, 4, 11, 8, 18, 15, 14, 14 };
     const y = [_]f32{ 14, 16, 10, 15, 16, 16, 1, 10, 13, 14, 13, 15 };
     try std.testing.expectEqual(1688, dotProduct(&x, &y));
+}
+
+// TODO: Support non-floats with quantization and whatnot.
+/// Transpose `a` (`rows` by `cols`) into `aT` (`cols` by `rows`).
+/// Requires `a` and `aT` have the length and that `T` is a float.
+/// Requires `a.len == aT.len == rows*cols`.
+pub fn transpose(T: type, aT: []T, a: []const T, rows: usize, cols: usize) void {
+    floatOnly(T);
+
+    std.debug.assert(a.len == aT.len);
+    std.debug.assert(a.len == rows * cols);
+
+    for (0..rows) |i| {
+        for (0..cols) |j| {
+            aT[j * rows + i] = a[i * cols + j];
+        }
+    }
+}
+
+test "transpose f32" {
+    var old = [_]f32{ 3, 4, 2.5, 8, 8, -3, 7, 7, -3, -2, -4, 0 };
+    var new = [_]f32{0} ** 12;
+    const expected = [_]f32{ 3, 2.5, 8, 7, -3, -4, 4, 8, -3, 7, -2, 0 };
+
+    transpose(f32, &new, &old, 6, 2);
+    try std.testing.expectEqualSlices(f32, &expected, &new);
 }

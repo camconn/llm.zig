@@ -29,11 +29,83 @@ pub const Q6KBlock = extern struct {
     scale: u16,
 };
 
-// TODO: Vectorize this
 /// Dequantize `in` from the `Q6_K` quantization format into `T` float values.
+/// This is a vectorized form of the straightforward linear implementation in
+/// `dequantize_q6_ks`. If you are trying to diagnose or improve this version, study that method.
+///
 /// Refer to `dequantize_row_q6_K` in GGML [1] for the reference implementation.
 /// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-quants.c#L1690
 pub fn dequantize_q6_k(T: type, in: []const Q6KBlock, out: []T) void {
+    const block_size = blockUnitLen(Q6KBlock);
+    // blocks are processed in groups of 16 elements
+    const group_size = 16;
+
+    const SVec = @Vector(group_size, u3);
+    const BVec = @Vector(group_size, u8);
+    const IVec = @Vector(group_size, i8);
+    const FVec = @Vector(group_size, f32);
+
+    for (0.., in) |i, block| {
+        const offset = i * block_size;
+
+        const superblock_scale: f32 = @as(f16, @bitCast(block.scale));
+
+        const w_lo = block.weights_lo;
+        const w_hi = block.weights_hi;
+        const scales = block.scales;
+
+        const groups = block_size / group_size;
+
+        // In-lining this group-wise loop empirically cuts execution time so that this
+        // implementation is competitive with the reference `dequantize_q6_k_ref` one from GGML.
+        // This was measured to cut execution time on a matrix of (4096x4096) ona Zen 3 5900X
+        // with DDR4 ECC memory at 3600 MHz from 3548 μs/iter to 2996 μs/iter, scaling better
+        // as the matrix sizes grows.
+        // This method under-performs the `dequantize_q6_k_ref` implementation at all sizes below
+        // 4096x2048. At that size and above, this method has an advantage in execution time.
+        inline for (0..groups) |g| {
+            const j = g * group_size;
+            const half: usize = @intFromBool(g >= 8);
+            const lo_idx = @mod(j, 64) + half * 64;
+            const hi_idx = @mod(j, 32) + half * 32;
+
+            const lo_shift: u3 = @intCast(@mod(j / 64, 2) * 4);
+            const hi_shift: u3 = @intCast(@mod((j / 32) * 2, 8));
+
+            var lo: BVec = w_lo[lo_idx..][0..group_size].*;
+            var hi: BVec = w_hi[hi_idx..][0..group_size].*;
+
+            const lo_shr: SVec = @splat(lo_shift);
+            lo >>= lo_shr;
+            lo &= @as(BVec, @splat(0x0f));
+
+            const hi_shr: SVec = @splat(hi_shift);
+            hi = hi >> hi_shr;
+            hi &= @as(BVec, @splat(0x03));
+            hi <<= @as(BVec, @splat(4));
+
+            const wt_u = lo | hi;
+            var wt: IVec = @intCast(wt_u);
+            wt -%= @splat(32);
+            const wt_f: FVec = @floatFromInt(wt);
+
+            // Cast scales from i8 to f32
+            const sc = @as(f32, @floatFromInt(scales[g]));
+            const scale: FVec = @splat(superblock_scale * sc);
+
+            out[offset + g * group_size ..][0..group_size].* = scale * wt_f;
+        }
+    }
+}
+
+/// **DO NOT USE** this method. It is slower than the equivalent `dequantize_q6_k` and
+/// `dequantize_q6_k_ref` implementations. It is only included for test purposes.
+///
+/// Dequantize `in` from the `Q6_K` quantization format into `T` float values.
+/// This is the straight-forward implementation with no swizzling or vectorization.
+/// Refer to `dequantize_row_q6_K` in GGML [1] for the reference implementation.
+/// [1]: https://github.com/ggml-org/ggml/blob/17733de6a7854b9696be7a563711c9aa4a34b2d3/src/ggml-quants.c#L1690
+pub fn dequantize_q6_ks(T: type, in: []const Q6KBlock, out: []T) void {
     const block_size = blockUnitLen(Q6KBlock);
 
     for (0.., in) |i, block| {
@@ -65,64 +137,6 @@ pub fn dequantize_q6_k(T: type, in: []const Q6KBlock, out: []T) void {
 
             const weight: f32 = @floatCast(superblock_scale * sc * w_f);
             out[offset + j] = weight;
-        }
-    }
-}
-
-pub fn dequantize_q6_k2(T: type, in: []const Q6KBlock, out: []T) void {
-    const block_size = blockUnitLen(Q6KBlock);
-
-    for (0.., in) |i, block| {
-        const offset = i * block_size;
-
-        const superblock_scale: f32 = @as(f16, @bitCast(block.scale));
-
-        const w_lo = block.weights_lo;
-        const w_hi = block.weights_hi;
-        const scales = block.scales;
-
-        for (0..@divExact(QK_K, 128)) |j| {
-            const n = j * 128;
-            const y = &out[offset + n ..][0..128];
-
-            const lo = w_lo[j * 64 .. (j + 1) * 64];
-            const hi = w_hi[j * 32 .. (j + 1) * 32];
-
-            const sc = scales[j * 8 .. (j + 1) * 8];
-
-            // The reference code has something equivalent to this unrolled.
-            // This version rolled-up version for is here for readability.
-            for (0..4) |k| {
-                const hi_shift: u3 = @truncate(k * 2);
-                const lo_shift: u3 = @truncate((k / 2) * 4);
-                const l_jump = @as(usize, @intFromBool(k & 1 == 1)) * 32;
-                const scale_offset = k * 2;
-
-                for (0..32) |l| {
-                    const scale_base = l / 16;
-                    const hi_src = hi[l];
-
-                    const loo = l + l_jump;
-
-                    const lo_nibble = ((lo[loo] >> lo_shift) & 0x0f);
-                    const hi_nibble = (((hi_src >> hi_shift) & 3) << 4);
-
-                    const sco: f32 = @floatFromInt(sc[scale_base + scale_offset]);
-
-                    const wt: i8 = @intCast(hi_nibble | lo_nibble);
-                    const wt_f: f32 = @floatFromInt(wt -% 32);
-
-                    const yo = superblock_scale * sco * wt_f;
-
-                    //const out_idx = offset + n + l + k * 32;
-                    //const lo_off = j * 64 + loo;
-                    //const hi_off = j * 32 + l;
-                    //const scale_total = j * 8 + scale_base + scale_offset;
-                    //std.debug.print("{},{},{},{},{},{}\n", .{ out_idx, lo_off, hi_off, scale_total, lo_shift, hi_shift });
-
-                    y.*[l + k * 32] = @floatCast(yo);
-                }
-            }
         }
     }
 }
@@ -183,6 +197,32 @@ pub fn dequantize_q6_k_ref(T: type, in: []const Q6KBlock, out: []T) void {
             }
         }
     }
+}
+
+test "equivalence for dequantize_q6_k*" {
+    // ensure that the dequantize kernels for q6_k are correct by running them on the same input
+    // and checking the resulting output is the same
+
+    var rng = std.Random.Xoroshiro128.init(std.testing.random_seed);
+    const random = rng.random();
+
+    var orig = [_]f32{0} ** (QK_K * 3);
+    for (0..orig.len) |i| {
+        orig[i] = random.float(f32) * 1000;
+    }
+    var input = [_]Q6KBlock{std.mem.zeroes(Q6KBlock)} ** 3;
+    _ = quantize_q6_k(&orig, &input);
+
+    var out_vec = [_]f32{0} ** (QK_K * 3);
+    var out_straight = [_]f32{0} ** (QK_K * 3);
+    var out_ref = [_]f32{0} ** (QK_K * 3);
+
+    dequantize_q6_k(f32, &input, out_vec[0..]);
+    dequantize_q6_ks(f32, &input, out_straight[0..]);
+    dequantize_q6_k_ref(f32, &input, out_ref[0..]);
+
+    try std.testing.expectEqualSlices(f32, &out_ref, &out_vec);
+    try std.testing.expectEqualSlices(f32, &out_ref, &out_straight);
 }
 
 const group_max_eps: comptime_float = 1e-15;
